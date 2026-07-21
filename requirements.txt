@@ -1,0 +1,14 @@
+# ParaFrames tutor — training + serving stack
+# Pin versions; this ecosystem moves fast and breaks across releases.
+torch>=2.4
+transformers==4.46.*
+peft==0.13.*
+trl==0.11.*
+datasets>=3.0
+accelerate>=1.0
+bitsandbytes>=0.44
+# flash-attn is optional; install separately if your CUDA/toolchain supports it:
+#   pip install flash-attn --no-build-isolation
+# Serving + eval:
+vllm>=0.6.3
+openai>=1.40
