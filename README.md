@@ -41,13 +41,30 @@ Serve several subjects at once by listing more `--lora-modules` and raising
 `paraclient.py` is a Claude Code-style terminal chat for the served model. It
 streams replies with live markdown, lets you switch **subject** (the vLLM
 `model`/adapter) and **mode** (`socratic` / `graduated_hint`) on the fly, and
-needs none of the training stack — just three light deps:
+needs none of the training stack — just three light deps.
+
+**Install (one-liner)** — downloads the client into an isolated venv and puts a
+`paraclient` launcher on your PATH; touches nothing else:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/paraframes-ai/paraclient-v2/main/install.sh | bash
+```
+
+Re-run to update; `rm -rf ~/.paraclient ~/.local/bin/paraclient` to uninstall.
+Pin a version with `PARACLIENT_REF=<tag>`, change the location with
+`PARACLIENT_DIR` / `BIN_DIR`.
+
+**Or from a clone:**
 
 ```bash
 pip install -r requirements-client.txt
-
-# the endpoint is required (no baked-in default): flag, env, or config file
 python paraclient.py --base-url http://localhost:8000/v1 --subject math
+```
+
+**Point it at your endpoint** — required, no baked-in default (flag > env > config):
+
+```bash
+paraclient --base-url http://localhost:8000/v1 --subject math
 #   or: export PARACLIENT_BASE_URL=http://localhost:8000/v1
 #   or: ~/.config/paraclient/config.json  {"base_url": "...", "subject": "math"}
 ```
