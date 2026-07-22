@@ -1,6 +1,6 @@
 # ParaFrames Tutor — Adapter Training Pipeline
 
-One shared base (`Qwen/Qwen2.5-7B-Instruct`, Apache-2.0) + one LoRA adapter per
+One shared base (`paraframes-ai/paraclient`) + one LoRA adapter per
 subject. Each adapter learns **two modes** from the data:
 
 - **socratic** — withholds the answer, guides with questions.
