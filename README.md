@@ -47,12 +47,18 @@ needs none of the training stack — just three light deps.
 `paraclient` launcher on your PATH; touches nothing else:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/paraframes-ai/paraclient-v2/main/install.sh | bash
+# prod (default)
+curl -fsSL https://platform.prod.internal.paraframes.org/install.sh | bash
+
+# edu
+curl -fsSL https://platform.edu.internal.paraframes.org/install.sh | bash -s -- --env edu
 ```
 
 Re-run to update; `rm -rf ~/.paraclient ~/.local/bin/paraclient` to uninstall.
-Pin a version with `PARACLIENT_REF=<tag>`, change the location with
-`PARACLIENT_DIR` / `BIN_DIR`.
+Change the location with `PARACLIENT_DIR` / `BIN_DIR`; override the source with
+`PARACLIENT_HOST` / `PARACLIENT_BASE`; add `PARACLIENT_INSECURE=1` if the host's
+internal CA isn't trusted yet. Standing up those hosts: see
+[`hosting/HOSTING.md`](hosting/HOSTING.md).
 
 **Or from a clone:**
 
