@@ -1,0 +1,6 @@
+# ParaClient — terminal chat client only.
+# You do NOT need the training/serving stack (torch, vllm, ...) just to chat.
+#   pip install -r requirements-client.txt
+openai>=1.40
+rich>=13.0
+prompt_toolkit>=3.0

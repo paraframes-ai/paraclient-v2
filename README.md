@@ -36,6 +36,36 @@ python scripts/eval_adapter.py --adapter math
 Serve several subjects at once by listing more `--lora-modules` and raising
 `--max-loras`. Select the subject per request via the `model` field.
 
+## Chatting with it — ParaClient TUI
+
+`paraclient.py` is a Claude Code-style terminal chat for the served model. It
+streams replies with live markdown, lets you switch **subject** (the vLLM
+`model`/adapter) and **mode** (`socratic` / `graduated_hint`) on the fly, and
+needs none of the training stack — just three light deps:
+
+```bash
+pip install -r requirements-client.txt
+
+# the endpoint is required (no baked-in default): flag, env, or config file
+python paraclient.py --base-url http://localhost:8000/v1 --subject math
+#   or: export PARACLIENT_BASE_URL=http://localhost:8000/v1
+#   or: ~/.config/paraclient/config.json  {"base_url": "...", "subject": "math"}
+```
+
+Inside the chat, plain text goes to the tutor; anything starting with `/` is a
+command. Highlights (full list via `/help`):
+
+| command | does |
+|---|---|
+| `/subject <name>` (`/model`) | switch adapter/subject (the vLLM `model`) |
+| `/mode socratic\|graduated_hint` | switch tutor behavior |
+| `/system [text\|reset]` | show / override / reset the system prompt |
+| `/retry`, `/undo`, `/clear` | re-run last turn / drop last exchange / reset chat |
+| `/save [path]` | write the transcript to markdown |
+| `/url`, `/temp`, `/tokens`, `/info` | inspect or change endpoint & sampling |
+
+Ctrl-C stops a running reply (keeping the partial); Ctrl-D or `/exit` quits.
+
 ## Per-subject data status
 
 | Subject        | Source                              | Status                         |
