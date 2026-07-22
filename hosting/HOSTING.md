@@ -17,6 +17,8 @@ Two hosts, one per environment (default is **prod**):
 | edu  | `platform.edu.internal.paraframes.org`    |
 
 These hosts don't exist yet — this doc + `publish.sh` define what to stand up.
+For a turnkey GCP setup (VM + firewall + DNS + nginx + interim TLS), use
+[`deploy/`](deploy/README.md) instead of the manual steps below.
 
 ## Publish
 
