@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Provision the ParaClient install-endpoint VM (internal-only e2-micro), a
-# firewall rule for 80/443, and — if DNS_ZONE is set — the A records for both
-# platform hosts. Idempotent-ish: safe to re-run (create-or-update on records,
-# create failures on existing VM/firewall are surfaced, not swallowed).
+# Provision the PUBLIC ParaClient install-endpoint: a reserved static public IP,
+# an e2-micro VM (nginx + certbot via startup-script), a firewall opening 80/443
+# to the internet, and — if DNS_ZONE is set — the public A records for both
+# platform hosts. Safe to re-run (create-or-update on records; existing
+# VM/IP/firewall are reported, not fatal).
 #
 #   cp config.env.example config.env && $EDITOR config.env
 #   ./provision-vm.sh
 #
-# Then run ./deploy.sh to push the files.
+# Then: point DNS at the printed IP (auto if DNS_ZONE set), run ./enable-tls.sh,
+# then ./deploy.sh.
 set -euo pipefail
 cd "$(dirname "$0")"
 [ -f config.env ] || { echo "copy config.env.example -> config.env first" >&2; exit 1; }
@@ -18,46 +20,56 @@ cd "$(dirname "$0")"
 : "${VPC:?set VPC in config.env}"
 : "${VM_NAME:?set VM_NAME in config.env}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-micro}"
+REGION="${ZONE%-*}"
+IP_NAME="${VM_NAME}-ip"
 
 NET_ARGS=(--network="$VPC")
 [ -n "${SUBNET:-}" ] && NET_ARGS+=(--subnet="$SUBNET")
 
-echo "==> Creating VM $VM_NAME ($MACHINE_TYPE, internal-only) in $ZONE"
+echo "==> Reserving static public IP $IP_NAME in $REGION"
+gcloud compute addresses create "$IP_NAME" --project="$PROJECT" --region="$REGION" \
+  || echo "   (address may already exist — continuing)"
+IP=$(gcloud compute addresses describe "$IP_NAME" --project="$PROJECT" \
+  --region="$REGION" --format='get(address)')
+echo "==> Public IP: $IP"
+
+echo "==> Creating VM $VM_NAME ($MACHINE_TYPE, public) in $ZONE"
 gcloud compute instances create "$VM_NAME" \
   --project="$PROJECT" --zone="$ZONE" \
   --machine-type="$MACHINE_TYPE" \
   --image-family=debian-12 --image-project=debian-cloud \
-  --no-address \
+  --address="$IP" \
   "${NET_ARGS[@]}" \
   --tags=paraclient-web \
-  --metadata-from-file=startup-script=startup-script.sh
+  --metadata-from-file=startup-script=startup-script.sh \
+  || echo "   (VM may already exist — continuing)"
 
-echo "==> Allowing 80/443 from ${ALLOW_CIDR:-10.0.0.0/8} to tag paraclient-web"
+echo "==> Opening 80/443 to the internet (tag paraclient-web)"
 gcloud compute firewall-rules create paraclient-web-allow \
   --project="$PROJECT" --network="$VPC" \
   --direction=INGRESS --action=ALLOW --rules=tcp:80,tcp:443 \
   --target-tags=paraclient-web \
-  --source-ranges="${ALLOW_CIDR:-10.0.0.0/8}" \
+  --source-ranges=0.0.0.0/0 \
   || echo "   (firewall rule may already exist — continuing)"
 
-IP=$(gcloud compute instances describe "$VM_NAME" \
-  --project="$PROJECT" --zone="$ZONE" \
-  --format='get(networkInterfaces[0].networkIP)')
-echo "==> VM internal IP: $IP"
-
 if [ -n "${DNS_ZONE:-}" ]; then
-  for h in prod edu; do
-    fqdn="platform.$h.internal.paraframes.org."
-    echo "==> DNS $fqdn -> $IP (zone $DNS_ZONE)"
+  for fqdn in "${HOST_PROD:?}." "${HOST_EDU:?}."; do
+    echo "==> DNS $fqdn -> $IP (public zone $DNS_ZONE)"
     gcloud dns record-sets create "$fqdn" --project="$PROJECT" --zone="$DNS_ZONE" \
       --type=A --ttl=300 --rrdatas="$IP" 2>/dev/null \
     || gcloud dns record-sets update "$fqdn" --project="$PROJECT" --zone="$DNS_ZONE" \
       --type=A --ttl=300 --rrdatas="$IP"
   done
 else
-  echo "==> DNS_ZONE not set — create A records yourself:"
-  echo "    platform.prod.internal.paraframes.org -> $IP"
-  echo "    platform.edu.internal.paraframes.org  -> $IP"
+  echo "==> DNS_ZONE not set — add these PUBLIC A records yourself:"
+  echo "      ${HOST_PROD:?}  A  $IP"
+  echo "      ${HOST_EDU:?}   A  $IP"
 fi
 
-echo "==> Done. Wait ~1 min for the startup script, then: ./deploy.sh"
+cat <<EOF
+
+==> VM provisioned. Next:
+    1. Make sure both hostnames resolve to $IP  (dig +short ${HOST_PROD})
+    2. ./enable-tls.sh     # gets real Let's Encrypt certs for both hosts
+    3. ./deploy.sh         # pushes the installer files
+EOF
