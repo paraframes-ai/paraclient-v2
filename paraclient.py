@@ -100,6 +100,15 @@ class Session:
         return [{"role": "system", "content": self.system_prompt()}] + self.history
 
     # ---- networking ----
+    def list_models(self, quiet=False):
+        """Return the server's model/subject ids, or None on failure."""
+        try:
+            return [m.id for m in self.client.models.list().data]
+        except Exception as e:                       # noqa: BLE001
+            if not quiet:
+                self._api_error(e)
+            return None
+
     def stream_reply(self):
         """Stream one assistant turn. Returns the full text (may be partial if
         interrupted). Appends the reply to history on the caller's behalf."""
@@ -167,6 +176,7 @@ HELP = """\
 [bold]Commands[/bold]
   [cyan]/help[/cyan]                 show this help
   [cyan]/subject[/cyan] <name>       switch adapter/subject (the vLLM `model`), alias [cyan]/model[/cyan]
+  [cyan]/models[/cyan]               list the subjects the server actually serves
   [cyan]/mode[/cyan] [name]          show or set mode: socratic | graduated_hint
   [cyan]/system[/cyan] [text]        show / override / clear the system prompt ([cyan]/system reset[/cyan])
   [cyan]/temp[/cyan] [0-2]           show or set sampling temperature
@@ -226,8 +236,23 @@ def handle_command(sess, line) -> bool:
         if arg:
             sess.subject = arg
             c.print(f"[green]subject → {arg}[/green]")
+            avail = sess.list_models(quiet=True)
+            if avail is not None and arg not in avail:
+                c.print(f"[yellow]note: '{arg}' isn't in the server's list "
+                        f"({', '.join(avail) or 'none'}) — /models to check[/yellow]")
         else:
             c.print(f"subject: [bold]{sess.subject}[/bold]")
+    elif cmd == "models":
+        ids = sess.list_models()
+        if ids is not None:
+            if not ids:
+                c.print("[yellow](server returned no models)[/yellow]")
+            for mid in ids:
+                mark = "  [green]← current[/green]" if mid == sess.subject else ""
+                c.print(f"  [bold]{mid}[/bold]{mark}")
+            if sess.subject not in ids:
+                c.print(f"[yellow]current subject '{sess.subject}' is not "
+                        f"served — pick one above with /subject[/yellow]")
     elif cmd == "mode":
         if not arg:
             c.print(f"mode: [bold]{sess.mode}[/bold]  "
@@ -322,15 +347,17 @@ def banner(console, sess):
                   "reply · Ctrl-D quits[/dim]\n")
 
 
-def build_prompt_session(sess):
+def build_prompt_session(sess, subjects=()):
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.formatted_text import HTML
 
-    cmds = ["/help", "/subject ", "/model ", "/mode ", "/system ", "/temp ",
-            "/tokens ", "/url ", "/info", "/retry", "/undo", "/clear",
-            "/save ", "/exit"]
+    cmds = ["/help", "/subject ", "/model ", "/models", "/mode ", "/system ",
+            "/temp ", "/tokens ", "/url ", "/info", "/retry", "/undo",
+            "/clear", "/save ", "/exit"]
+    # offer live subject names as completions of /subject
+    cmds += [f"/subject {s}" for s in subjects]
     completer = WordCompleter(cmds, sentence=True, ignore_case=True)
 
     try:
@@ -400,7 +427,22 @@ def main():
                    base_url)
 
     banner(console, sess)
-    psession = build_prompt_session(sess)
+
+    # best-effort startup probe: confirm we can reach the server and show what
+    # subjects it serves (also feeds tab-completion). Never fatal.
+    console.print("[dim]connecting…[/dim]")
+    subjects = sess.list_models(quiet=True)
+    if subjects:
+        console.print(f"[dim]subjects available: [/dim]{', '.join(subjects)}")
+        if sess.subject not in subjects:
+            console.print(f"[yellow]heads up: '{sess.subject}' isn't served — "
+                          f"switch with /subject or /models[/yellow]")
+    else:
+        console.print("[yellow]couldn't list models (server unreachable or key "
+                      "rejected). You can still chat, or fix with /url.[/yellow]")
+    console.print()
+
+    psession = build_prompt_session(sess, subjects or ())
 
     while True:
         try:
