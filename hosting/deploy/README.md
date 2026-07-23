@@ -1,30 +1,42 @@
-# Deploy the install endpoint (new e2-micro on GCP)
+# Deploy the PUBLIC install endpoint (e2-micro on GCP)
 
-Stands up a small internal-only VM that serves the ParaClient installer at
-`https://platform.{prod,edu}.internal.paraframes.org/`. Both hostnames resolve
-to the same VM; users pick the env with `--env edu` at install time.
+Stands up a small public VM that serves the installer at
+`https://platform.{prod,edu}.internal.paraframes.org/install.sh` — reachable
+from anywhere (your Mac included) with a real, trusted HTTPS cert.
 
-## One-time setup
+> "internal" is just part of the hostname. The record lives in your **public**
+> paraframes.org DNS, so it resolves everywhere. Both hostnames point at the
+> same VM; users pick the env with `--env edu` at install time.
+
+## One-time setup (run in order)
 
 ```bash
 cd hosting/deploy
-cp config.env.example config.env      # fill in PROJECT/ZONE/VPC/... (config.env is gitignored)
+cp config.env.example config.env      # fill in PROJECT/ZONE/VPC/CERTBOT_EMAIL (config.env is gitignored)
 gcloud auth login                     # if not already authenticated
-./provision-vm.sh                     # creates VM + firewall (+ DNS if DNS_ZONE set)
-# wait ~1 min for the boot startup-script (installs nginx + interim TLS + vhost)
-./deploy.sh                           # publishes files and pushes them to the VM
+
+./provision-vm.sh                     # static IP + VM (nginx+certbot) + firewall + optional DNS
+#   -> prints the PUBLIC IP
+
+# Point BOTH hostnames at that IP in your PUBLIC paraframes.org DNS.
+#   - if you set DNS_ZONE (a public Cloud DNS zone), provision-vm.sh did it for you
+#   - otherwise add the A records now, and wait for them to resolve:
+#       dig +short platform.prod.internal.paraframes.org   # should show the IP
+
+./enable-tls.sh                       # real Let's Encrypt certs for both hosts (auto-renews)
+./deploy.sh                           # publishes the installer files to the VM
 ```
 
-Prereq if you set `DNS_ZONE`: a **private** Cloud DNS zone for
-`internal.paraframes.org` attached to your VPC. Create once with:
+Test from your Mac:
 
 ```bash
-gcloud dns managed-zones create paraframes-internal \
-  --dns-name="internal.paraframes.org." --visibility=private \
-  --networks=<your-vpc>
+curl -fsSL https://platform.prod.internal.paraframes.org/install.sh | bash
+curl -fsSL https://platform.edu.internal.paraframes.org/install.sh | bash -s -- --env edu
 ```
 
-## Updating the client
+No `PARACLIENT_INSECURE` needed — the cert is trusted.
+
+## Updating the client later
 
 Edit `paraclient.py` / `install.sh` / `requirements-client.txt`, then:
 
@@ -32,22 +44,30 @@ Edit `paraclient.py` / `install.sh` / `requirements-client.txt`, then:
 cd hosting/deploy && ./deploy.sh
 ```
 
-Clients update by re-running the install one-liner — nothing else to do.
+Users update by re-running the one-liner. Nothing else to touch (cert renews on
+its own).
 
 ## What each file does
 
-| file                 | role                                                        |
-|----------------------|-------------------------------------------------------------|
-| `config.env.example` | copy to `config.env`; environment settings for the scripts  |
-| `startup-script.sh`  | runs on the VM at boot: nginx + self-signed cert + vhost     |
-| `provision-vm.sh`    | creates the VM, firewall rule, and (optional) DNS A records  |
-| `deploy.sh`          | `publish.sh` + push `dist/` to `/var/www/paraclient`, reload |
+| file                 | role                                                              |
+|----------------------|------------------------------------------------------------------|
+| `config.env.example` | copy to `config.env`; environment settings                       |
+| `startup-script.sh`  | VM boot: nginx + certbot, serves `/var/www/paraclient` over HTTP  |
+| `provision-vm.sh`    | reserve static IP, create VM + firewall (80/443 open) + DNS       |
+| `enable-tls.sh`      | certbot → real HTTPS for both hostnames (run after DNS resolves)  |
+| `deploy.sh`          | `publish.sh` + push `dist/` to the web root, reload nginx         |
 
-## TLS: read before real rollout
+## Ordering matters
 
-`startup-script.sh` generates a **self-signed** cert so HTTPS works day one.
-Clients must then install with `PARACLIENT_INSECURE=1`, which skips TLS verify —
-fine for a first test, **not** for production. Replace it with an internal-CA
-cert for both hostnames (drop `platform.crt`/`platform.key` in
-`/etc/ssl/paraframes/` and `sudo systemctl reload nginx`), and distribute the CA
-to client machines so the plain one-liner verifies cleanly.
+`enable-tls.sh` must run **after** DNS points at the VM — Let's Encrypt proves
+you control the names via an HTTP challenge on port 80. If you run it too early
+it fails harmlessly; just fix DNS and re-run.
+
+## Teardown
+
+```bash
+gcloud compute instances delete "$VM_NAME" --zone "$ZONE"
+gcloud compute firewall-rules delete paraclient-web-allow
+gcloud compute addresses delete "${VM_NAME}-ip" --region "${ZONE%-*}"
+# and remove the two A records
+```
