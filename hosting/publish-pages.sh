@@ -18,6 +18,8 @@ publish_one() {
   local dir="$WORK/$env"
   echo "==> $repo ($host)"
   git clone -q "https://github.com/$repo.git" "$dir"
+  git -C "$dir" config user.name "${GIT_AUTHOR_NAME:-AshwinVBala}"
+  git -C "$dir" config user.email "${GIT_AUTHOR_EMAIL:-ashwin@csail.mit.edu}"
   cp "$ROOT/install.sh" "$ROOT/paraclient.py" "$ROOT/requirements-client.txt" "$dir/"
   echo "$host" > "$dir/CNAME"
   cat > "$dir/index.html" <<HTML

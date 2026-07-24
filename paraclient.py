@@ -65,14 +65,17 @@ def load_config_file() -> dict:
 
 
 def resolve(args, cfg, key, env, default=None):
-    """Precedence: CLI flag > env var > config file > default."""
+    """Precedence: CLI flag > env var > config file > default.
+    Config keys may be written with hyphens or underscores (base-url/base_url).
+    """
     val = getattr(args, key.replace("-", "_"), None)
     if val is not None:
         return val
     if env and os.environ.get(env):
         return os.environ[env]
-    if key in cfg and cfg[key] is not None:
-        return cfg[key]
+    for k in (key.replace("-", "_"), key):   # accept base_url and base-url
+        if cfg.get(k) is not None:
+            return cfg[k]
     return default
 
 
