@@ -40,6 +40,9 @@ def main():
                     help="effective batch = batch-size * grad-accum")
     ap.add_argument("--no-flash-attn", action="store_true",
                     help="set if flash-attn 2 isn't installed")
+    ap.add_argument("--save-steps", type=int, default=0,
+                    help="if >0, checkpoint every N steps instead of every epoch "
+                         "(use for long jobs on a preemptable partition)")
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -106,13 +109,16 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         logging_steps=10,
-        save_strategy="epoch",
+        save_strategy="steps" if args.save_steps else "epoch",
+        save_total_limit=3,
         bf16=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         packing=False,           # keep off: preserves turn boundaries in chats
         report_to="none",
     )
+    if args.save_steps:
+        cfg_kwargs["save_steps"] = args.save_steps
     # trl 0.11.x names this max_seq_length; newer trl renamed it to max_length.
     _sft_params = inspect.signature(SFTConfig.__init__).parameters
     cfg_kwargs["max_length" if "max_length" in _sft_params else "max_seq_length"] = \

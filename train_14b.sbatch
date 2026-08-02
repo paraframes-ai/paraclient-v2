@@ -25,9 +25,12 @@ export HF_HOME="$WORK/hf"
 
 cd "$WORK/paraclient-v2"
 nvidia-smi
+# args after <subject> <data.jsonl> are passed straight through to train_adapter.py
+# (e.g. --save-steps 150 for long preemptable jobs).
 srun python train_adapter.py \
   --subject "$SUBJ" \
   --data "$DATA" \
   --base Qwen/Qwen2.5-14B-Instruct \
   --out-dir adapters14b \
-  --no-flash-attn
+  --no-flash-attn \
+  "${@:3}"
