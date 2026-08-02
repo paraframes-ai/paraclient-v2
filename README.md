@@ -36,6 +36,59 @@ python scripts/eval_adapter.py --adapter math
 Serve several subjects at once by listing more `--lora-modules` and raising
 `--max-loras`. Select the subject per request via the `model` field.
 
+## Chatting with it — ParaClient TUI
+
+`paraclient.py` is a Claude Code-style terminal chat for the served model. It
+streams replies with live markdown, lets you switch **subject** (the vLLM
+`model`/adapter) and **mode** (`socratic` / `graduated_hint`) on the fly, and
+needs none of the training stack — just three light deps.
+
+**Install (one-liner)** — downloads the client into an isolated venv and puts a
+`paraclient` launcher on your PATH; touches nothing else:
+
+```bash
+# prod (default)
+curl -fsSL https://platform.prod.internal.paraframes.org/install.sh | bash
+
+# edu
+curl -fsSL https://platform.edu.internal.paraframes.org/install.sh | bash -s -- --env edu
+```
+
+Re-run to update; `rm -rf ~/.paraclient ~/.local/bin/paraclient` to uninstall.
+Change the location with `PARACLIENT_DIR` / `BIN_DIR`; override the source with
+`PARACLIENT_HOST` / `PARACLIENT_BASE`; add `PARACLIENT_INSECURE=1` if the host's
+internal CA isn't trusted yet. Standing up those hosts: see
+[`hosting/HOSTING.md`](hosting/HOSTING.md).
+
+**Or from a clone:**
+
+```bash
+pip install -r requirements-client.txt
+python paraclient.py --base-url http://localhost:8000/v1 --subject math
+```
+
+**Point it at your endpoint** — required, no baked-in default (flag > env > config):
+
+```bash
+paraclient --base-url http://localhost:8000/v1 --subject math
+#   or: export PARACLIENT_BASE_URL=http://localhost:8000/v1
+#   or: ~/.config/paraclient/config.json  {"base_url": "...", "subject": "math"}
+```
+
+Inside the chat, plain text goes to the tutor; anything starting with `/` is a
+command. Highlights (full list via `/help`):
+
+| command | does |
+|---|---|
+| `/subject <name>` (`/model`) | switch adapter/subject (the vLLM `model`) |
+| `/mode socratic\|graduated_hint` | switch tutor behavior |
+| `/system [text\|reset]` | show / override / reset the system prompt |
+| `/retry`, `/undo`, `/clear` | re-run last turn / drop last exchange / reset chat |
+| `/save [path]` | write the transcript to markdown |
+| `/url`, `/temp`, `/tokens`, `/info` | inspect or change endpoint & sampling |
+
+Ctrl-C stops a running reply (keeping the partial); Ctrl-D or `/exit` quits.
+
 ## Per-subject data status
 
 | Subject        | Source                              | Status                         |
