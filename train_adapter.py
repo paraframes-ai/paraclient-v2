@@ -17,6 +17,7 @@ Produces a LoRA adapter (~tens of MB) at adapters/<subject>/ — NOT a merged
 full model. vLLM serves it with --enable-lora.
 """
 import argparse
+import inspect
 import torch
 
 
@@ -89,7 +90,7 @@ def main():
         return [tok.apply_chat_template(m, tokenize=False)
                 for m in batch["messages"]]
 
-    cfg = SFTConfig(
+    cfg_kwargs = dict(
         output_dir=f"{args.out_dir}/{args.subject}",
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
@@ -102,18 +103,25 @@ def main():
         bf16=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        max_seq_length=args.max_seq_len,
         packing=False,           # keep off: preserves turn boundaries in chats
         report_to="none",
     )
+    # trl 0.11.x names this max_seq_length; newer trl renamed it to max_length.
+    _sft_params = inspect.signature(SFTConfig.__init__).parameters
+    cfg_kwargs["max_length" if "max_length" in _sft_params else "max_seq_length"] = \
+        args.max_seq_len
+    cfg = SFTConfig(**cfg_kwargs)
 
+    # trl 0.11.x takes tokenizer=; newer trl renamed it to processing_class=.
+    _trainer_params = inspect.signature(SFTTrainer.__init__).parameters
+    _tok_kw = "processing_class" if "processing_class" in _trainer_params else "tokenizer"
     trainer = SFTTrainer(
         model=model,
         args=cfg,
         train_dataset=ds,
         peft_config=lora,
-        tokenizer=tok,
         formatting_func=formatting_func,
+        **{_tok_kw: tok},
     )
 
     print(f"[*] Training {args.subject} adapter on {len(ds)} examples "
