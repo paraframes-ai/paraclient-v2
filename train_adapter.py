@@ -79,9 +79,15 @@ def main():
                         "gate_proj", "up_proj", "down_proj"],
     )
 
-    # Our JSONL rows carry subject/mode alongside `messages`. TRL applies the
-    # Qwen chat template to the `messages` field automatically.
+    # Our JSONL rows carry subject/mode alongside `messages`. Newer TRL applies
+    # the chat template to `messages` automatically; the pinned trl 0.11.x does
+    # not, so render each conversation to text explicitly via a formatting_func
+    # (batched form: returns one string per example).
     ds = load_dataset("json", data_files=args.data, split="train")
+
+    def formatting_func(batch):
+        return [tok.apply_chat_template(m, tokenize=False)
+                for m in batch["messages"]]
 
     cfg = SFTConfig(
         output_dir=f"{args.out_dir}/{args.subject}",
@@ -106,7 +112,8 @@ def main():
         args=cfg,
         train_dataset=ds,
         peft_config=lora,
-        processing_class=tok,
+        tokenizer=tok,
+        formatting_func=formatting_func,
     )
 
     print(f"[*] Training {args.subject} adapter on {len(ds)} examples "

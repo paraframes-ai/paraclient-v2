@@ -35,9 +35,12 @@ USAGE:
   python scripts/build_dataset.py --subject language_arts
 """
 import argparse
+import collections
 import json
+import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -62,6 +65,9 @@ def load_fairytaleqa(path: Path):
             "context": (row.get("story_text") or row.get("context") or "").strip(),
             "question": (row.get("question") or "").strip(),
             "reference_answer": (row.get("answer") or "").strip(),
+            # provenance only (not used in the prompt) — lets us report which
+            # story each synthesized dialogue came from.
+            "story": (row.get("story_name") or "unknown").strip(),
         }
 
 
@@ -111,17 +117,30 @@ SUBJECT_LABEL = {"language_arts": "language arts", "civics": "civics"}
 
 _MODE_INSTRUCTION = {
     "socratic": (
-        "Produce a SOCRATIC tutoring dialogue. The tutor NEVER states the final "
-        "answer. The tutor guides the student with one focused question at a "
-        "time, using the reference answer only to steer — never to reveal. If "
-        "the student is stuck, the tutor makes the question smaller, not easier "
-        "to cheat. End with the student reasoning toward the idea themselves."
+        "Produce a SOCRATIC tutoring dialogue. The tutor NEVER states, confirms, "
+        "or restates the final answer — not at any point, and especially not in "
+        "the final turn. The tutor guides with one focused question at a time, "
+        "using the reference answer only to steer, never to reveal. If the "
+        "student is stuck, the tutor makes the question smaller and more "
+        "concrete, not easier to cheat. The LAST tutor turn MUST be a guiding "
+        "question or a prompt for the student to put the answer in their own "
+        "words; it must NOT state, confirm, or paraphrase the conclusion. The "
+        "dialogue ends WITHOUT the tutor ever stating the answer — the student "
+        "is the only one who articulates it."
     ),
     "graduated_hint": (
-        "Produce a GRADUATED-HINT homework dialogue. The tutor guides with "
-        "questions first, but when the student stays stuck it escalates support "
-        "step by step: a broader hint, then a partial worked step, so the "
-        "student can finish. The tutor never opens with the full answer."
+        "Produce a GRADUATED-HINT homework dialogue. The tutor's VERY FIRST "
+        "turn MUST be a direct question addressed to the student — for example, "
+        "open with \"What do you already know about ...?\" or \"Where in the "
+        "passage would you look for ...?\". Begin the dialogue by engaging the "
+        "student directly; the tutor never narrates its own process. Ask at "
+        "least one or two genuine guiding questions BEFORE offering any hint, "
+        "and do NOT state the answer within the first two turns. When the "
+        "student stays stuck, escalate support gradually, in this order: "
+        "guiding question -> a small hint -> a bigger hint -> a partial worked "
+        "step -> and only then help the student reach the full answer. The "
+        "tutor never opens with the answer and never jumps straight to it; the "
+        "step-by-step escalation must be visible in the dialogue."
     ),
 }
 
@@ -135,6 +154,15 @@ def build_generation_prompt(seed: dict, mode: str) -> list:
     sys = (
         f"You generate training data: realistic K-12 {subj} tutoring dialogues "
         f"for grade level {seed['grade']}. {_MODE_INSTRUCTION[mode]}\n\n"
+        "CONTRAST BETWEEN THE TWO MODES (respect this exactly): in SOCRATIC "
+        "mode the tutor NEVER resolves the problem — the answer only ever comes "
+        "out of the student's mouth. In GRADUATED-HINT mode the tutor DOES "
+        "eventually help the student reach the answer, but ONLY after real, "
+        "visible, step-by-step escalation — never immediately.\n"
+        "The tutor always speaks DIRECTLY to the student and NEVER narrates its "
+        "own thought process: do not write phrases like \"let me think\", "
+        "\"let me read the passage again\", or any first-person meta-commentary "
+        "about reading or reasoning — just tutor the student.\n\n"
         "Output STRICT JSON only — no prose, no markdown fences — as a list of "
         "turns: [{\"role\":\"user\"|\"assistant\",\"content\":\"...\"}, ...]. "
         "The FIRST turn is role \"user\" (the student). Alternate strictly. The "
@@ -165,7 +193,11 @@ def generate(client, model, messages, max_tokens=1200, retries=3):
         try:
             r = client.chat.completions.create(
                 model=model, messages=messages,
-                max_tokens=max_tokens, temperature=0.8)
+                max_tokens=max_tokens, temperature=0.8,
+                # Qwen3 defaults to "thinking mode" and emits <think>...</think>
+                # before its reply, which breaks strict-JSON parsing below.
+                # Disable it so the model returns only the JSON turn list.
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}})
             return r.choices[0].message.content.strip()
         except Exception as e:  # noqa: BLE001 — surface + retry any API error
             last = e
@@ -175,9 +207,42 @@ def generate(client, model, messages, max_tokens=1200, retries=3):
 
 _FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
+# Backup safety net for meta-narration that slips past the prompt fix: strip a
+# leading self-narration clause ("let me think", "let me ask you", "let's see",
+# "I'll take a look", ...) from the START of a tutor turn. Applied to EVERY
+# tutor turn (the tic shows up mid-dialogue too, not just turn 1). Conservative
+# by design: it only fires on a curated set of meta openers and only consumes up
+# to the first clause boundary ( , . ; : ? ! ), so it strips the opener phrase
+# without eating the legitimate question/content that follows. The prompt
+# instruction is still primary; this just cleans leftovers.
+_META_LEAD = re.compile(
+    r"^\s*(?:"
+    r"let me (?:think|read|reread|re-read|see|look|check|"
+    r"help(?: a little| you out)?|ask(?: you)?)"
+    r"|let'?s (?:see|think|look|start)"
+    r"|i'?ll (?:take a look|read|check|see|help)"
+    r")\b[^.?!,;:]*[.?!,;:]+\s*",
+    re.IGNORECASE)
+
+
+def strip_leading_meta(text: str) -> str:
+    """Strip a single leading meta-narration clause if present.
+
+    Only removes a curated meta opener up to the first clause boundary, so
+    legitimate content is preserved. Returns the original text if stripping
+    would empty it (e.g. the whole turn was just the meta phrase)."""
+    cleaned = _META_LEAD.sub("", text, count=1).lstrip()
+    return cleaned if cleaned else text
+
 
 def parse_turns(raw: str):
-    """Parse the model's JSON turn list; tolerate accidental code fences."""
+    """Parse the model's JSON turn list; tolerate accidental code fences.
+
+    Enforces: non-empty list, valid turn shapes, starts on user, ends on
+    assistant, and STRICT user/assistant alternation. Malformed generations
+    (e.g. several tutor turns in a row) are rejected here so they never reach
+    the dataset.
+    """
     txt = _FENCE.sub("", raw.strip())
     turns = json.loads(txt)  # will raise if the model didn't obey — caught below
     if not isinstance(turns, list) or not turns:
@@ -187,6 +252,10 @@ def parse_turns(raw: str):
             raise ValueError("bad turn shape")
     if turns[0]["role"] != "user" or turns[-1]["role"] != "assistant":
         raise ValueError("must start on user, end on assistant")
+    expected = ["user", "assistant"]
+    for idx, t in enumerate(turns):
+        if t["role"] != expected[idx % 2]:
+            raise ValueError("turns do not strictly alternate user/assistant")
     return turns
 
 
@@ -219,12 +288,19 @@ def main():
                     help="cap seed items (for a small trial run)")
     ap.add_argument("--modes", nargs="+", default=["socratic", "graduated_hint"],
                     choices=["socratic", "graduated_hint"])
+    ap.add_argument("--concurrency", type=int, default=12,
+                    help="parallel generation requests (vLLM batches these; "
+                         "8-16 is sane on one L4). 1 = sequential.")
     args = ap.parse_args()
 
     from openai import OpenAI
     client = OpenAI(base_url=args.generator_url, api_key=args.api_key)
 
     seeds = list(SEED_LOADERS[args.subject](Path(args.seed)))
+    # Shuffle deterministically BEFORE applying --limit so a trial samples
+    # across many stories instead of taking the first N Q&A from one tale
+    # (the seed file is ordered by story). Fixed seed => reproducible trials.
+    random.Random(42).shuffle(seeds)
     if args.limit:
         seeds = seeds[:args.limit]
     if not seeds:
@@ -234,37 +310,82 @@ def main():
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    written = skipped = 0
+    skips = collections.Counter()        # reason -> count (reject rate/bias)
+    story_drops = collections.Counter()  # story -> drop count (per-story bias)
+
+    # Build the task list first (one per (seed, mode)); skip empty questions.
+    tasks = []  # (i, seed, mode)
+    for i, seed in enumerate(seeds):
+        if not seed["question"]:
+            print(f"  [skip] item {i}: empty question")
+            skips["empty question"] += 1
+            continue
+        for mode in args.modes:
+            tasks.append((i, seed, mode))
+
+    def work(seed, mode):
+        raw = generate(client, args.generator_model,
+                       build_generation_prompt(seed, mode))
+        turns = parse_turns(raw)
+        # Backup meta-narration strip on EVERY tutor turn (the tic can appear
+        # mid-dialogue). Prompt fix is primary; this cleans leftovers.
+        for t in turns:
+            if t["role"] == "assistant":
+                t["content"] = strip_leading_meta(t["content"])
+        messages = [{"role": "system",
+                     "content": system_prompt_for(args.subject, mode)}]
+        messages.extend(turns)
+        return {"subject": args.subject, "mode": mode, "messages": messages}
+
+    # Run generations concurrently (vLLM batches them); the OpenAI client is
+    # thread-safe. Results are keyed by (i, mode) so we can write them back in
+    # deterministic seed order regardless of completion order.
+    results = {}
+    done = 0
+    print(f"[*] Generating {len(tasks)} dialogues at concurrency "
+          f"{args.concurrency}...")
+    with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+        fut_meta = {ex.submit(work, seed, mode): (i, seed, mode)
+                    for (i, seed, mode) in tasks}
+        for fut in as_completed(fut_meta):
+            i, seed, mode = fut_meta[fut]
+            done += 1
+            try:
+                results[(i, mode)] = fut.result()
+            except Exception as e:  # noqa: BLE001 — surface + tally any failure
+                reason = ("malformed JSON"
+                          if isinstance(e, json.JSONDecodeError) else str(e))
+                print(f"  [skip] item {i} mode {mode}: {reason}")
+                skips[reason] += 1
+                story_drops[seed["story"]] += 1
+            if done % 200 == 0:
+                print(f"  ...{done}/{len(tasks)} done "
+                      f"({len(results)} ok, {sum(skips.values())} skipped)")
+
+    # Write in deterministic (seed, mode) order — reproducible, not race-order.
+    written = 0
     with open(out_path, "w") as fh:
         for i, seed in enumerate(seeds):
-            if not seed["question"]:
-                skipped += 1
-                continue
             for mode in args.modes:
-                prompt = build_generation_prompt(seed, mode)
-                try:
-                    raw = generate(client, args.generator_model, prompt)
-                    turns = parse_turns(raw)
-                except Exception as e:  # noqa: BLE001
-                    print(f"  [skip] item {i} mode {mode}: {e}")
-                    skipped += 1
-                    continue
+                row = results.get((i, mode))
+                if row is not None:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    written += 1
 
-                messages = [{"role": "system",
-                             "content": system_prompt_for(args.subject, mode)}]
-                messages.extend(turns)
-                row = {"subject": args.subject, "mode": mode,
-                       "messages": messages}
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-                written += 1
-
-            if (i + 1) % 25 == 0:
-                print(f"  ...processed {i + 1}/{len(seeds)} seeds "
-                      f"({written} dialogues written)")
-
-    print(f"[✓] Wrote {written} dialogues to {out_path}  (skipped {skipped})")
+    total_skipped = sum(skips.values())
+    print(f"[✓] Wrote {written} dialogues to {out_path}  (skipped {total_skipped})")
+    if skips:
+        print("    Drop reasons (watch for content bias at scale):")
+        for reason, n in skips.most_common():
+            print(f"      {n:4d}  {reason}")
+    if story_drops:
+        n_stories = len({s["story"] for _, s, _ in tasks})
+        print(f"    Drops span {len(story_drops)}/{n_stories} stories; "
+              f"top offenders (watch for per-story bias):")
+        for story, n in story_drops.most_common(10):
+            print(f"      {n:4d}  {story}")
     print(f"    Next: human-review this file (REQUIRED for civics), then")
-    print(f"    `python scripts/build_dataset.py --subject {args.subject}` to "
+    print(f"    `python build_dataset.py --subject {args.subject}` to "
           f"validate + merge for training.")
     if args.subject == "civics":
         print("    ⚠ Civics: review every dialogue for neutrality before training.")
