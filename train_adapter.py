@@ -17,6 +17,7 @@ Produces a LoRA adapter (~tens of MB) at adapters/<subject>/ — NOT a merged
 full model. vLLM serves it with --enable-lora.
 """
 import argparse
+import glob
 import inspect
 import torch
 
@@ -132,7 +133,10 @@ def main():
 
     print(f"[*] Training {args.subject} adapter on {len(ds)} examples "
           f"(effective batch {args.batch_size * args.grad_accum})...")
-    trainer.train()
+    # Resume from the latest checkpoint if one exists (so a preempted/requeued
+    # job on the preemptable partition continues instead of restarting at step 0).
+    _ckpts = glob.glob(f"{args.out_dir}/{args.subject}/checkpoint-*")
+    trainer.train(resume_from_checkpoint=bool(_ckpts))
     trainer.save_model(f"{args.out_dir}/{args.subject}")
     print(f"[✓] Saved LoRA adapter -> {args.out_dir}/{args.subject}")
 
