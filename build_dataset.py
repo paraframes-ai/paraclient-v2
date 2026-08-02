@@ -199,8 +199,18 @@ def validate(rows):
             raise ValueError(f"row {i}: messages must start with a system turn")
         # must alternate user/assistant after system, end on assistant
         roles = [m["role"] for m in msgs[1:]]
+        if not roles or roles[0] != "user":
+            raise ValueError(f"row {i}: dialogue must start on a user turn")
         if roles[-1] != "assistant":
             raise ValueError(f"row {i}: dialogue must end on an assistant turn")
+        # Second gate mirroring synthesize_dialogues.parse_turns: reject any
+        # dialogue whose turns don't strictly alternate user/assistant (e.g.
+        # several tutor turns in a row from a malformed generation).
+        expected = ["user", "assistant"]
+        for j, role in enumerate(roles):
+            if role != expected[j % 2]:
+                raise ValueError(
+                    f"row {i}: turns must strictly alternate user/assistant")
         ok.append(r)
     return ok
 
