@@ -86,9 +86,15 @@ def main():
     # (batched form: returns one string per example).
     ds = load_dataset("json", data_files=args.data, split="train")
 
-    def formatting_func(batch):
-        return [tok.apply_chat_template(m, tokenize=False)
-                for m in batch["messages"]]
+    def formatting_func(ex):
+        # trl 0.11.x calls this batched: ex["messages"] is a list of conversations,
+        # so return one rendered string per conversation. Newer trl calls it
+        # per-example: ex["messages"] is a single conversation (list of role/content
+        # dicts), so return one string. Detect by whether the first element is a list.
+        msgs = ex["messages"]
+        if msgs and isinstance(msgs[0], list):
+            return [tok.apply_chat_template(m, tokenize=False) for m in msgs]
+        return tok.apply_chat_template(msgs, tokenize=False)
 
     cfg_kwargs = dict(
         output_dir=f"{args.out_dir}/{args.subject}",
