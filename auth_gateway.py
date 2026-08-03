@@ -37,7 +37,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from content_filter import ContentFilter, Action  # noqa: E402
 import generate_media as gm  # noqa: E402
-from cad_schema import sys_for, clean_sketch, clean_solid  # noqa: E402
+from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
+                        repair_sketch, floorplan_issues)
 from circuit_schema import (CIRCUIT_SYS, erc as circuit_erc,  # noqa: E402
                             clean as circuit_clean)
 
@@ -320,7 +321,13 @@ def build_app(tutor_url: str, tutor_key: str):
             data = gen_cad_json(mode, prompt, units)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"CAD ({mode}) generation failed: {e}")
-        out = clean_sketch(data, units) if mode == "sketch" else clean_solid(data, units)
+        if mode == "sketch":
+            ok, issues = floorplan_issues(clean_sketch(data, units))
+            out = repair_sketch(data, units)   # relayouts only if the plan is invalid
+            if not ok:
+                print(f"[cad] floor-plan auto-repaired (model geometry invalid: {issues})")
+        else:
+            out = clean_solid(data, units)
         return JSONResponse(out)
 
     @app.post("/v1/sketch")
