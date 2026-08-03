@@ -23,3 +23,5 @@ __pycache__/
 *.pyc
 .claude/
 *.bak
+serve_vllm_active.sh
+*.7b-backup
