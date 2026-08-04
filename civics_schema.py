@@ -122,3 +122,46 @@ def validate(row: dict, *, require_approved: bool = False) -> dict:
             f"training rows must be human-approved; got {row['review_status']!r}"
         )
     return row
+
+
+# --- Serving-time time-varying detector --------------------------------------
+# The civics adapter is trained NOT to assert volatile facts from memory. At
+# serving time we still need to decide which incoming questions are volatile so
+# the gateway can route them to civics_agent (live official-source lookup)
+# instead of the adapter. This is a heuristic: it fires on questions about
+# current office-holders / a user's own representatives, or an office noun paired
+# with a "current/now/today" temporal cue. Over-firing is safe (it just triggers
+# a cited .gov lookup); under-firing is the risk, so the patterns are generous.
+import re  # noqa: E402
+
+# Offices whose holder changes over time.
+_OFFICE = (r"president|vice[-\s]?president|speaker(?:\s+of\s+the\s+house)?|"
+           r"chief\s+justice|senators?|representatives?|congress(?:wo)?m[ae]n|"
+           r"governors?|secretary\s+of\s+state|attorney\s+general|"
+           r"majority\s+leader|minority\s+leader")
+_TEMPORAL = r"now|current(?:ly)?|today|right\s+now|these\s+days|at\s+present|this\s+year"
+
+_TV_PATTERNS = [
+    # "who is (the current) <office>", "what is the name of the <office>"
+    re.compile(rf"\bwho\s+is\s+(?:the\s+)?(?:current\s+)?(?:{_OFFICE})\b", re.I),
+    re.compile(rf"\b(?:name|what.*name)\s+of\s+the\s+(?:{_OFFICE})\b", re.I),
+    # "name your U.S. representative", "who is one of your state's senators"
+    re.compile(rf"\b(?:name|who\s+is)\b.*\byour\b.*\b(?:{_OFFICE})\b", re.I),
+    re.compile(rf"\byour\s+(?:u\.?s\.?\s+|state'?s?\s+)?(?:{_OFFICE})\b", re.I),
+    re.compile(r"\bwho\s+represents\s+you\b", re.I),
+    # an office noun explicitly tied to a "current/now/today" cue
+    re.compile(rf"\b(?:{_OFFICE})\b.*\b(?:{_TEMPORAL})\b", re.I),
+    re.compile(rf"\b(?:{_TEMPORAL})\b.*\b(?:{_OFFICE})\b", re.I),
+    # recent/upcoming elections and current counts
+    re.compile(r"\b(?:most\s+recent|last|latest|upcoming|next)\s+(?:\w+\s+)?election\b", re.I),
+    re.compile(rf"\bhow\s+many\b.*\b(?:{_TEMPORAL})\b", re.I),
+]
+
+
+def is_time_varying(question: str) -> bool:
+    """True if a civics question asks for a fact that changes over time and so
+    should be answered by live official-source lookup, not from the adapter."""
+    if not isinstance(question, str) or not question.strip():
+        return False
+    q = question.strip()
+    return any(p.search(q) for p in _TV_PATTERNS)

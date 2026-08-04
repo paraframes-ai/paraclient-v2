@@ -43,6 +43,8 @@ from circuit_schema import (CIRCUIT_SYS, erc as circuit_erc,  # noqa: E402
                             clean as circuit_clean)
 from notes_schema import (normalize_image, notes_messages,  # noqa: E402
                           clean_transcription)
+from civics_schema import sys_for as civics_sys, is_time_varying  # noqa: E402
+from civics_agent import answer_time_varying  # noqa: E402
 
 KEYSTORE = Path(__file__).with_name("gateway_keys.json")
 
@@ -99,6 +101,14 @@ BASE_MODEL = "ParaFrames/ParaClient-v2.2"
 # becomes vision-capable after the v4 cutover, so until then the route returns a
 # clear 503 instead of a wrong answer.
 NOTES_MODEL = os.environ.get("NOTES_MODEL", BASE_MODEL)
+
+# Civics has TWO answer paths (see /v1/civics): static civic knowledge is served
+# by the dedicated civics adapter; time-varying facts (current office-holders,
+# a user's own representatives) are NOT memorized -- they route to civics_agent,
+# which runs the ReAct loop against official .gov/.mil sources. The agent loop
+# runs on the general base model (BASE_MODEL); only the static path needs the
+# civics adapter, which arrives with the ParaClient-v4 cutover.
+CIVICS_MODEL = os.environ.get("CIVICS_MODEL", "ParaFrames/ParaClient-civics-v2.2")
 
 # The circuit route runs on a SEPARATE CPU llama.cpp server (a Qwen2.5-3B model
 # specialized for netlists), never the GPU. Schema/ERC live in circuit_schema.py.
@@ -369,6 +379,64 @@ def build_app(tutor_url: str, tutor_key: str):
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"circuit generation failed: {e}")
         return JSONResponse(data)
+
+    @app.post("/v1/civics")
+    async def civics_route(request: Request,
+                           authorization: str | None = Header(None)):
+        """K-12 civics Q&A with a split answer path:
+          * time-varying questions (current office-holders, a user's own reps) ->
+            civics_agent: a live ReAct lookup constrained to official .gov/.mil
+            sources, returned WITH a citation. Never answered from memory.
+          * static civic knowledge -> the dedicated civics adapter (CIVICS_MODEL).
+        Civics is a tutoring capability, so it follows the same audience/mode gate
+        as /v1/chat (edu may use it via socratic/graduated_hint)."""
+        rec = auth(authorization)
+        body = await request.json()
+        question = (body.get("question") or "").strip()
+        if not question:
+            raise HTTPException(400, "question required")
+        mode = body.get("mode", "graduated_hint")
+        if mode not in AUDIENCE_MODES.get(rec["audience"], set()):
+            raise HTTPException(
+                403, f"mode '{mode}' not allowed for audience '{rec['audience']}'")
+        din = filt.screen_input(question)
+        if din.action != Action.ALLOW:
+            return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
+
+        source = None
+        if is_time_varying(question):
+            # Live, officially-sourced answer — runs on the general base model.
+            try:
+                res = answer_time_varying(tutor, BASE_MODEL, question)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(502, f"civics live lookup failed: {e}")
+            answer = res.get("answer", "")
+            if res.get("source_url"):
+                source = {"title": res.get("source_title", ""),
+                          "url": res["source_url"], "verified": res.get("verified", False)}
+            answer_route = "live_agent"
+        else:
+            # Static civic knowledge -> the civics adapter (arrives with v4).
+            try:
+                resp = tutor.chat.completions.create(
+                    model=CIVICS_MODEL,
+                    messages=[{"role": "system", "content": civics_sys()},
+                              {"role": "user", "content": question}],
+                    max_tokens=body.get("max_tokens", 400),
+                    temperature=body.get("temperature", 0.3))
+                answer = resp.choices[0].message.content
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(
+                    503, "civics adapter not serving yet (arrives with the "
+                         f"ParaClient-v4 cutover): {e}")
+            answer_route = "static"
+
+        dout = filt.screen_output(answer)
+        if dout.action != Action.ALLOW:
+            answer = dout.student_message
+        return JSONResponse({"answer": answer, "route": answer_route,
+                             "source": source,
+                             "safety": {"action": dout.action.value}})
 
     @app.post("/v1/notes")
     async def notes_route(request: Request,
