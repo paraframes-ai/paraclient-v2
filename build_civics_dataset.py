@@ -31,22 +31,29 @@ import civics_schema as cs
 
 
 def _time_varying_answer(item: dict) -> str:
-    """Teach the stable concept + how to look up the current fact — never assert
-    the volatile fact from memory."""
+    """Teach the stable concept + that the current fact is looked up live from an
+    official source — never assert the volatile fact from memory. At serving time
+    civics_agent.answer_time_varying runs the ReAct search/fetch loop against a
+    .gov/.mil source and fills in the current, cited answer."""
     concept = (item.get("concept") or "").strip()
-    tail = ("This is something that changes over time, so I won't state the "
-            "current answer from memory — check an up-to-date official source "
-            "for who holds the office right now.")
+    tail = ("That can change over time, so instead of answering from memory I "
+            "look it up from an official U.S. government (.gov) source and cite "
+            "it, so the answer is current.")
     return f"{concept} {tail}".strip() if concept else tail
 
 
 def to_candidate(item: dict, band: str) -> dict:
-    assistant = _time_varying_answer(item) if item.get("time_varying") else item["a"]
+    time_varying = bool(item.get("time_varying", False))
+    assistant = _time_varying_answer(item) if time_varying else item["a"]
     row = {
         "subject": "civics",
         "grade_band": band,
         "strand": item["strand"],
-        "time_varying": bool(item.get("time_varying", False)),
+        "time_varying": time_varying,
+        # How the serving layer answers this row: "static" = the trained answer
+        # is used directly; "live_agent" = route to civics_agent for a fresh,
+        # officially-sourced answer (time-varying facts).
+        "route": "live_agent" if time_varying else "static",
         "source": item["source"],
         "license": item["license"],
         "attribution": item.get("attribution", ""),
@@ -79,7 +86,8 @@ def build(src_dir: str, out: str) -> tuple[int, int]:
     return n, len(items)
 
 
-def promote(candidates: str, out: str) -> tuple[int, int]:
+def promote(candidates: str, out: str, approve_all: bool = False,
+            reviewer: str = "") -> tuple[int, int]:
     kept = total = 0
     with open(out, "w") as w:
         with open(candidates) as fh:
@@ -89,6 +97,14 @@ def promote(candidates: str, out: str) -> tuple[int, int]:
                     continue
                 total += 1
                 row = json.loads(line)
+                if approve_all and row.get("review_status") != "rejected":
+                    # Explicit, auditable bypass of the human-review gate: stamp
+                    # every non-rejected candidate as approved by the given tag
+                    # so the promoted file records that review was auto-approved.
+                    row["review_status"] = "approved"
+                    row["reviewer"] = reviewer or "auto-approved"
+                    row["review_notes"] = ("auto-approved (human review bypassed "
+                                           "by operator request)")
                 if row.get("review_status") == "approved":
                     cs.validate(row, require_approved=True)
                     w.write(json.dumps(row) + "\n")
@@ -103,11 +119,17 @@ def main() -> None:
     ap.add_argument("--out", default="data/civics.jsonl")
     ap.add_argument("--promote", action="store_true",
                     help="promote human-approved candidates into the training file")
+    ap.add_argument("--approve-all", action="store_true",
+                    help="BYPASS human review: mark every non-rejected candidate "
+                         "approved before promoting (records reviewer tag)")
+    ap.add_argument("--reviewer", default="auto-approved",
+                    help="reviewer tag stamped on rows when --approve-all is set")
     a = ap.parse_args()
     os.makedirs("data", exist_ok=True)
 
     if a.promote:
-        kept, total = promote(a.candidates, a.out)
+        kept, total = promote(a.candidates, a.out,
+                              approve_all=a.approve_all, reviewer=a.reviewer)
         print(f"[✓] promoted {kept}/{total} approved rows -> {a.out}")
         if kept == 0:
             print("    (nothing approved yet — set review_status=\"approved\" on reviewed rows)")
