@@ -41,6 +41,8 @@ from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
                         repair_sketch, floorplan_issues)
 from circuit_schema import (CIRCUIT_SYS, erc as circuit_erc,  # noqa: E402
                             clean as circuit_clean)
+from notes_schema import (normalize_image, notes_messages,  # noqa: E402
+                          clean_transcription)
 
 KEYSTORE = Path(__file__).with_name("gateway_keys.json")
 
@@ -90,6 +92,13 @@ def model_for(mode: str, subject: str) -> str:
 # builder so the adapter is served exactly what it was trained on).
 CAD_MODEL = os.environ.get("CAD_MODEL", "ParaFrames/ParaClient-cad-v2.2")
 BASE_MODEL = "ParaFrames/ParaClient-v2.2"
+
+# /v1/notes (handwriting + math transcription) is a VISION call — it needs the
+# multimodal base VLM, which is the ParaClient-v4 (Gemma 4V) base served WITHOUT
+# a subject adapter. The served-model name is the same base string; it only
+# becomes vision-capable after the v4 cutover, so until then the route returns a
+# clear 503 instead of a wrong answer.
+NOTES_MODEL = os.environ.get("NOTES_MODEL", BASE_MODEL)
 
 # The circuit route runs on a SEPARATE CPU llama.cpp server (a Qwen2.5-3B model
 # specialized for netlists), never the GPU. Schema/ERC live in circuit_schema.py.
@@ -360,6 +369,48 @@ def build_app(tutor_url: str, tutor_key: str):
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"circuit generation failed: {e}")
         return JSONResponse(data)
+
+    @app.post("/v1/notes")
+    async def notes_route(request: Request,
+                          authorization: str | None = Header(None)):
+        """Transcribe a photo of handwritten notes (prose + math) -> editable
+        Markdown, math as LaTeX. Vision call to the ParaClient-v4 (Gemma 4V) base.
+        Non-socratic capability -> consumer/internal only. The transcription is
+        NEVER auto-trusted: needs_confirmation is always true so the app forces a
+        student confirm/edit step before the text is used or saved."""
+        rec = auth(authorization)
+        if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
+            raise HTTPException(
+                403, f"note transcription (non-socratic) not allowed for "
+                     f"audience '{rec['audience']}'")
+        body = await request.json()
+        try:
+            data_uri = normalize_image(body.get("image", ""))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        hint = str(body.get("hint", "")).strip()
+        if hint:
+            din = filt.screen_input(hint)
+            if din.action != Action.ALLOW:
+                return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
+        try:
+            resp = tutor.chat.completions.create(
+                model=NOTES_MODEL, messages=notes_messages(data_uri, hint),
+                max_tokens=int(body.get("max_tokens", 1500)),
+                temperature=float(body.get("temperature", 0.0)))
+            text = clean_transcription(resp.choices[0].message.content)
+        except Exception as e:  # noqa: BLE001
+            # The base model is not vision-capable until the ParaClient-v4
+            # (Gemma 4V) cutover — surface that clearly rather than a 502.
+            raise HTTPException(
+                503, "note transcription needs the multimodal ParaClient-v4 "
+                     f"(Gemma 4V) backend, which is not serving yet: {e}")
+        dout = filt.screen_output(text)
+        if dout.action != Action.ALLOW:
+            text = dout.student_message
+        return JSONResponse({"text": text, "format": "markdown+latex",
+                             "needs_confirmation": True, "model": NOTES_MODEL,
+                             "safety": {"action": dout.action.value}})
 
     @app.post("/v1/embed")
     async def embed(request: Request, authorization: str | None = Header(None)):
