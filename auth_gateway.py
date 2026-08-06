@@ -45,6 +45,8 @@ from notes_schema import (normalize_image, notes_messages,  # noqa: E402
                           clean_transcription)
 from civics_schema import sys_for as civics_sys, is_time_varying  # noqa: E402
 from civics_agent import answer_time_varying  # noqa: E402
+from spreadsheet_schema import (SPREADSHEET_SYS, spreadsheet_issues,  # noqa: E402
+                                clean_spreadsheet, evaluate_sheet)
 
 KEYSTORE = Path(__file__).with_name("gateway_keys.json")
 
@@ -109,6 +111,15 @@ NOTES_MODEL = os.environ.get("NOTES_MODEL", BASE_MODEL)
 # runs on the general base model (BASE_MODEL); only the static path needs the
 # civics adapter, which arrives with the ParaClient-v4 cutover.
 CIVICS_MODEL = os.environ.get("CIVICS_MODEL", "ParaFrames/ParaClient-civics-v2.2")
+
+# /v1/spreadsheet: 'generate' produces a {title, cells} sheet that is
+# formula-gated (spreadsheet_issues recomputes every formula before it's
+# served); 'tutor' explains a spreadsheet concept in plain language.
+SPREADSHEET_MODEL = os.environ.get("SPREADSHEET_MODEL",
+                                   "ParaFrames/ParaClient-spreadsheet-v2.2")
+SPREADSHEET_TUTOR_SYS = (
+    "You are a friendly, clear spreadsheet tutor for students. Explain concepts "
+    "and formulas simply, with a concrete example, and keep it short.")
 
 # The circuit route runs on a SEPARATE CPU llama.cpp server (a Qwen2.5-3B model
 # specialized for netlists), never the GPU. Schema/ERC live in circuit_schema.py.
@@ -219,6 +230,30 @@ def build_app(tutor_url: str, tutor_key: str):
         if isinstance(last, dict):
             return last          # ERC-imperfect but structurally clean
         raise RuntimeError("no parseable netlist from circuit model")
+
+    def gen_spreadsheet(prompt: str) -> dict:
+        """Spreadsheet JSON on the spreadsheet adapter with a formula-gated
+        rejection sample: return the first sheet whose formulas all compute
+        (spreadsheet_issues), else the best-effort structurally-clean last one."""
+        msgs = [{"role": "system", "content": SPREADSHEET_SYS},
+                {"role": "user", "content": prompt}]
+        last = None
+        for model in (SPREADSHEET_MODEL, BASE_MODEL):
+            for _ in range(3):
+                try:
+                    r = tutor.chat.completions.create(
+                        model=model, messages=msgs,
+                        max_tokens=1500, temperature=0.3)
+                    sheet = clean_spreadsheet(
+                        gm.parse_json(r.choices[0].message.content.strip()))
+                    last = sheet
+                    if spreadsheet_issues(sheet)[0]:
+                        return sheet
+                except Exception:  # noqa: BLE001
+                    pass
+        if isinstance(last, dict):
+            return last          # formula-imperfect but structurally clean
+        raise RuntimeError("no parseable spreadsheet from model")
 
     def lookup(authorization: str | None):
         """Validate the bearer key only (no rate-limit consumption)."""
@@ -379,6 +414,55 @@ def build_app(tutor_url: str, tutor_key: str):
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"circuit generation failed: {e}")
         return JSONResponse(data)
+
+    @app.post("/v1/spreadsheet")
+    async def spreadsheet_route(request: Request,
+                                authorization: str | None = Header(None)):
+        """Generate a formula-gated spreadsheet (mode='generate', default) or
+        explain a spreadsheet concept (mode='tutor'). Generation is a
+        non-socratic capability -> consumer/internal only (same as CAD/circuit).
+        Generated sheets are returned with their computed values and a `valid`
+        flag from the same evaluator the dataset was built with."""
+        rec = auth(authorization)
+        if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
+            raise HTTPException(
+                403, f"spreadsheet generation (non-socratic) not allowed for "
+                     f"audience '{rec['audience']}'")
+        body = await request.json()
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            raise HTTPException(400, "prompt required")
+        din = filt.screen_input(prompt)
+        if din.action != Action.ALLOW:
+            return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
+
+        if body.get("mode") == "tutor":
+            try:
+                resp = tutor.chat.completions.create(
+                    model=SPREADSHEET_MODEL,
+                    messages=[{"role": "system", "content": SPREADSHEET_TUTOR_SYS},
+                              {"role": "user", "content": prompt}],
+                    max_tokens=body.get("max_tokens", 400), temperature=0.3)
+                answer = resp.choices[0].message.content
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(
+                    503, "spreadsheet adapter not serving yet (arrives with the "
+                         f"ParaClient-v4 cutover): {e}")
+            dout = filt.screen_output(answer)
+            if dout.action != Action.ALLOW:
+                answer = dout.student_message
+            return JSONResponse({"mode": "tutor", "answer": answer,
+                                 "safety": {"action": dout.action.value}})
+
+        try:
+            sheet = gen_spreadsheet(prompt)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"spreadsheet generation failed: {e}")
+        ok, issues = spreadsheet_issues(sheet)
+        values, _errs = evaluate_sheet(sheet.get("cells", []))
+        return JSONResponse({"mode": "generate", "title": sheet.get("title"),
+                             "cells": sheet.get("cells", []),
+                             "computed": values, "valid": ok, "issues": issues})
 
     @app.post("/v1/civics")
     async def civics_route(request: Request,
