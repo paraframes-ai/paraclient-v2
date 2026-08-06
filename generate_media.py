@@ -35,19 +35,21 @@ from docx.shared import Pt as DocxPt, RGBColor as DocxRGB
 # renderer maps the name to concrete colors/fonts. `dark` flags a dark bg so
 # the renderer uses light body text.
 # --------------------------------------------------------------------------
+# Monochrome only — every theme is pure grayscale (R=G=B). Themes vary by
+# shade/contrast/typeface, never by hue, so documents stay strictly black/white.
 THEMES = {
-    "academic":  dict(bg="EEF2F7", title="0B2545", body="1B2A41", accent="3D5A80",
+    "light":     dict(bg="FFFFFF", title="111111", body="333333", accent="666666",
                       font_head="Georgia", font_body="Calibri", dark=False),
-    "playful":   dict(bg="FFF7E6", title="E8590C", body="2B2B2B", accent="12B886",
-                      font_head="Verdana", font_body="Verdana", dark=False),
-    "corporate": dict(bg="FFFFFF", title="12335B", body="333333", accent="2F80ED",
+    "slate":     dict(bg="F2F2F2", title="1A1A1A", body="3A3A3A", accent="707070",
                       font_head="Calibri", font_body="Calibri", dark=False),
-    "nature":    dict(bg="F1F8E9", title="1B5E20", body="2E3D28", accent="66BB6A",
-                      font_head="Cambria", font_body="Calibri", dark=False),
-    "tech":      dict(bg="0F1620", title="4DD0E1", body="D0D7DE", accent="7C4DFF",
+    "newsprint": dict(bg="FAFAFA", title="0A0A0A", body="2B2B2B", accent="595959",
+                      font_head="Georgia", font_body="Georgia", dark=False),
+    "contrast":  dict(bg="FFFFFF", title="000000", body="1A1A1A", accent="000000",
+                      font_head="Calibri", font_body="Calibri", dark=False),
+    "dark":      dict(bg="121212", title="FFFFFF", body="D0D0D0", accent="8A8A8A",
                       font_head="Segoe UI", font_body="Segoe UI", dark=True),
 }
-DEFAULT_THEME = "corporate"
+DEFAULT_THEME = "light"
 
 # --------------------------------------------------------------------------
 # Generation
