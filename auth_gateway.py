@@ -656,6 +656,10 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(
                 403, "the Gemini route is not available to the 'edu' audience "
                      "(student data must stay on-prem; use the local tutor)")
+        if tier_of(rec) not in ("paid", "dev"):
+            raise HTTPException(
+                402, "external models (Gemini) require a paid plan "
+                     f"(your tier: {tier_of(rec)})")
         body = await request.json()
         messages = body.get("messages")
         if not messages:
@@ -700,6 +704,10 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(
                 403, "Claude routes are not available to the 'edu' audience "
                      "(student data must stay on-prem; use the local tutor)")
+        if tier_of(rec) not in ("paid", "dev"):
+            raise HTTPException(
+                402, "external Claude models require a paid plan "
+                     f"(your tier: {tier_of(rec)})")
         body = await request.json()
         messages = body.get("messages")
         if not messages:
@@ -746,13 +754,9 @@ def build_app(tutor_url: str, tutor_key: str):
     @app.post("/v1/claude-paid")
     async def claude_paid(request: Request,
                           authorization: str | None = Header(None)):
-        """Claude Opus via Vertex — the paid external-Claude tier. Requires the
-        paid/dev tier (Opus is the premium, higher-cost model)."""
+        """Claude Opus via Vertex — the premium external-Claude model. Paid/dev
+        only (enforced in _claude_route, like every off-box model)."""
         rec = auth(authorization)
-        if tier_of(rec) not in ("paid", "dev"):
-            raise HTTPException(
-                402, "Claude Opus (paid tier) requires a paid plan "
-                     f"(your tier: {tier_of(rec)})")
         return await _claude_route(request, rec, CLAUDE_PAID_MODEL, "paid")
 
     @app.post("/v1/embed")
