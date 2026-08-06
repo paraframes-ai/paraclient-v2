@@ -35,6 +35,7 @@ from pathlib import Path
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fastapi import HTTPException  # noqa: E402  (module-level: used by resolve_version)
 from content_filter import ContentFilter, Action  # noqa: E402
 import generate_media as gm  # noqa: E402
 from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
@@ -89,6 +90,54 @@ def model_for(mode: str, subject: str) -> str:
     if mode == "normal":
         return "ParaFrames/ParaClient-v2.2"
     return SUBJECT_MODEL.get(subject, "ParaFrames/ParaClient-v2.2")
+
+
+# --------------------------------------------------------------------------
+# Model-version tiers. A key's TIER decides which ParaClient generation it may
+# use. The single 24 GB L4 serves ONE version live on the GPU (v4, Gemma-4,
+# multimodal); v2 (7B) and v3 (14B) are served on CPU (llama.cpp) for the free
+# tier. v4 is premium -> paid/dev only. edu (schools) is treated as a PAID tier.
+# --------------------------------------------------------------------------
+VERSION_ACCESS = {
+    "v2": {"free", "paid", "dev"},
+    "v3": {"free", "paid", "dev"},
+    "v4": {"paid", "dev"},          # premium: GPU + multimodal, paid/dev/edu
+}
+PREFERRED_VERSION_ORDER = ("v4", "v3", "v2")   # best first, for defaulting
+VERSION_MODEL = {"v2": "paraclient-v2", "v3": "paraclient-v3"}  # CPU llama.cpp names
+
+
+def tier_of(rec: dict) -> str:
+    """A key's tier. Explicit `tier` wins; else derive: internal->dev,
+    edu->paid (schools pay), everything else->free."""
+    t = rec.get("tier")
+    if t in ("free", "paid", "dev"):
+        return t
+    return {"internal": "dev", "edu": "paid"}.get(rec.get("audience"), "free")
+
+
+def versions_for(rec: dict) -> list:
+    tier = tier_of(rec)
+    return sorted(v for v, tiers in VERSION_ACCESS.items() if tier in tiers)
+
+
+def resolve_version(rec: dict, requested: str | None) -> str:
+    """Pick the ParaClient version for this request, enforcing the tier gate.
+    402 (payment required) if the tier can't use the requested version."""
+    tier = tier_of(rec)
+    allowed = {v for v, tiers in VERSION_ACCESS.items() if tier in tiers}
+    if requested:
+        rv = str(requested).lower()
+        if rv not in VERSION_ACCESS:
+            raise HTTPException(400, f"unknown model version {requested!r}")
+        if rv not in allowed:
+            raise HTTPException(
+                402, f"model {rv} requires a paid plan (your tier: {tier})")
+        return rv
+    for v in PREFERRED_VERSION_ORDER:   # default to the best the tier allows
+        if v in allowed:
+            return v
+    raise HTTPException(403, "no model versions available for this account")
 
 
 # The CAD routes (/v1/sketch = 2D, /v1/3d = 3D) run entirely on the L4 via a
@@ -210,6 +259,14 @@ def build_app(tutor_url: str, tutor_key: str):
     circuit = OpenAI(base_url=CIRCUIT_URL, api_key="none")
     print(f"[*] /v1/circuit -> CPU llama.cpp {CIRCUIT_URL}")
 
+    # Older ParaClient generations for the free tier, served on CPU (llama.cpp).
+    # v4 is the GPU `tutor` above; v2/v3 clients point at their CPU servers.
+    V2_URL = os.environ.get("V2_URL", "http://127.0.0.1:8002/v1")
+    V3_URL = os.environ.get("V3_URL", "http://127.0.0.1:8003/v1")
+    version_client = {"v2": OpenAI(base_url=V2_URL, api_key="none"),
+                      "v3": OpenAI(base_url=V3_URL, api_key="none")}
+    print(f"[*] free-tier versions -> v2 {V2_URL} | v3 {V3_URL} (CPU)")
+
     def gen_circuit(prompt: str) -> dict:
         """Netlist on the CPU circuit model with ERC-gated rejection sampling:
         try a few, return the first electrically-valid one (else the best-effort
@@ -281,7 +338,8 @@ def build_app(tutor_url: str, tutor_key: str):
         is held ONLY by that server — never sent to browsers."""
         _, rec = lookup(authorization)
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
-                "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], []))}
+                "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
+                "tier": tier_of(rec), "allowed_versions": versions_for(rec)}
 
     @app.post("/v1/chat")
     async def chat(request: Request, authorization: str | None = Header(None)):
@@ -295,6 +353,9 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(
                 403, f"mode '{mode}' not allowed for audience '{rec['audience']}'")
 
+        # Tier gate: which ParaClient version this key may use (v4 = paid/dev).
+        version = resolve_version(rec, body.get("version"))
+
         user_turns = [m for m in messages if m.get("role") == "user"]
         latest = user_turns[-1]["content"] if user_turns else ""
 
@@ -306,20 +367,28 @@ def build_app(tutor_url: str, tutor_key: str):
 
         sys_msg = {"role": "system", "content": system_prompt(mode, subject)}
         convo = [sys_msg] + [m for m in messages if m.get("role") != "system"]
+        # v4 -> GPU adapter model; v2/v3 -> CPU llama.cpp base for that generation
+        if version == "v4":
+            client, model = tutor, model_for(mode, subject)
+        else:
+            client, model = version_client[version], VERSION_MODEL[version]
         try:
-            resp = tutor.chat.completions.create(
-                model=model_for(mode, subject), messages=convo,
+            resp = client.chat.completions.create(
+                model=model, messages=convo,
                 max_tokens=body.get("max_tokens", 400),
                 temperature=body.get("temperature", 0.3))
             answer = resp.choices[0].message.content
         except Exception:
-            raise HTTPException(502, "tutor backend unavailable")
+            raise HTTPException(
+                503, f"ParaClient {version} backend not available"
+                     + (" (CPU free-tier server not running yet)"
+                        if version != "v4" else ""))
 
         dout = filt.screen_output(answer)
         if dout.action != Action.ALLOW:
             answer = dout.student_message
         return JSONResponse({"role": "assistant", "content": answer,
-                             "model": model_for(mode, subject),
+                             "version": version, "model": model,
                              "safety": {"action": dout.action.value}})
 
     @app.post("/v1/generate")
