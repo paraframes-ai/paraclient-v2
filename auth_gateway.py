@@ -47,6 +47,7 @@ from civics_schema import sys_for as civics_sys, is_time_varying  # noqa: E402
 from civics_agent import answer_time_varying  # noqa: E402
 from spreadsheet_schema import (SPREADSHEET_SYS, spreadsheet_issues,  # noqa: E402
                                 clean_spreadsheet, evaluate_sheet)
+from gemini_backend import generate as gemini_generate  # noqa: E402
 
 KEYSTORE = Path(__file__).with_name("gateway_keys.json")
 
@@ -562,6 +563,56 @@ def build_app(tutor_url: str, tutor_key: str):
             text = dout.student_message
         return JSONResponse({"text": text, "format": "markdown+latex",
                              "needs_confirmation": True, "model": NOTES_MODEL,
+                             "safety": {"action": dout.action.value}})
+
+    @app.post("/v1/gemini")
+    async def gemini_route(request: Request,
+                           authorization: str | None = Header(None)):
+        """Proxy to Google Gemini on Vertex AI — the first external-provider
+        option. CONSUMER/INTERNAL ONLY: calls go OFF-BOX to Google, so the 'edu'
+        (child-facing) audience is blocked (student data stays on-prem), and
+        Gemini is a direct assistant with none of ParaClient's Socratic
+        withholding. Input + output are still run through the safety filter."""
+        rec = auth(authorization)
+        if rec["audience"] not in ("consumer", "internal"):
+            raise HTTPException(
+                403, "the Gemini route is not available to the 'edu' audience "
+                     "(student data must stay on-prem; use the local tutor)")
+        body = await request.json()
+        messages = body.get("messages")
+        if not messages:
+            prompt = (body.get("prompt") or "").strip()
+            if not prompt:
+                raise HTTPException(400, "messages or prompt required")
+            messages = [{"role": "user", "content": prompt}]
+        if body.get("system"):
+            messages = ([{"role": "system", "content": body["system"]}]
+                        + [m for m in messages if m.get("role") != "system"])
+        user_turns = [m for m in messages if m.get("role") == "user"]
+        latest = user_turns[-1]["content"] if user_turns else ""
+        din = filt.screen_input(latest if isinstance(latest, str) else "")
+        if din.action != Action.ALLOW:
+            return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
+        try:
+            text, used = gemini_generate(
+                messages, model=body.get("model"),
+                max_tokens=body.get("max_tokens", 800),
+                temperature=body.get("temperature", 0.7))
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if any(s in msg for s in ("SCOPE", "PERMISSION_DENIED", "403",
+                                      "credentials", "default credentials")):
+                raise HTTPException(
+                    503, "Gemini (Vertex) auth not configured. Needs ADC with "
+                         "cloud-platform scope (gcloud auth application-default "
+                         "login), the aiplatform API enabled, and roles/"
+                         f"aiplatform.user. Detail: {msg[:200]}")
+            raise HTTPException(502, f"Gemini call failed: {msg[:200]}")
+        dout = filt.screen_output(text)
+        if dout.action != Action.ALLOW:
+            text = dout.student_message
+        return JSONResponse({"role": "assistant", "content": text, "model": used,
+                             "provider": "google-vertex",
                              "safety": {"action": dout.action.value}})
 
     @app.post("/v1/embed")
