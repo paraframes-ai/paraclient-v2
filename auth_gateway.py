@@ -567,7 +567,14 @@ def build_app(tutor_url: str, tutor_key: str):
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
 
         source = None
-        if is_time_varying(question):
+        # COPPA/FERPA: the live lookup calls out to the web (DuckDuckGo + .gov),
+        # so a child's question would leave the box. EDU (child-facing) must stay
+        # fully on-prem — time-varying questions fall through to the civics
+        # adapter, which is trained to deflect ("that changes; check an official
+        # source") instead of asserting a stale fact. Live sourcing is for the
+        # adult consumer/internal audiences only.
+        live_ok = is_time_varying(question) and rec["audience"] != "edu"
+        if live_ok:
             # Live, officially-sourced answer — runs on the general base model.
             try:
                 res = answer_time_varying(tutor, BASE_MODEL, question)
