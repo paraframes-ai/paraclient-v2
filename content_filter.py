@@ -159,21 +159,28 @@ GENERIC_BLOCK_MSG = (
 
 class ContentFilter:
     def __init__(self, backend: ModerationBackend | None = None,
-                 log_path: str | None = "logs/content_filter.jsonl"):
+                 log_path: str | None = "logs/content_filter.jsonl",
+                 log_content: bool = False):
         self.backend = backend or HeuristicBackend()
         self.log_path = log_path
+        # DATA MINIMIZATION (COPPA/FERPA): by default we log only the decision
+        # metadata — NOT the student's text. Logging message content would put
+        # children's content at rest. Set log_content=True ONLY for local dev
+        # tuning on non-child data; never on the edu/production path.
+        self.log_content = log_content
 
-    # -- logging: every decision, allow or block, for R1 signal --------------
+    # -- logging: decision metadata only by default (no student content) ------
     def _log(self, surface: str, text: str, decision: Decision):
         if not self.log_path:
             return
         rec = {
             "ts": time.time(),
             "surface": surface,
-            # store a truncated preview, not necessarily the full text
-            "text_preview": text[:300],
+            "text_len": len(text),   # coarse signal, not the content itself
             "decision": asdict(decision) | {"action": decision.action.value},
         }
+        if self.log_content:  # opt-in, dev-only — never for student data
+            rec["text_preview"] = text[:300]
         try:
             import os
             os.makedirs(os.path.dirname(self.log_path), exist_ok=True)

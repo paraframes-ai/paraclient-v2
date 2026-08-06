@@ -42,12 +42,12 @@ tutoring; external LLM providers are used **only** on the paid consumer lane and
 
 ## ⚠️ Known gaps to remediate (flag for the clinic + fix)
 
-1. **Moderation content logging.** `content_filter.py` writes a `text_preview`
-   (first ~300 chars of student input/output) to `logs/content_filter.jsonl`.
-   For edu (children) this is student content at rest. **Recommend:** disable the
-   content preview for the edu audience (log the decision + category only), or set
-   a short retention + access control. *(Small code change — the logger already
-   supports `log_path=None`; add a content-redaction / edu-off switch.)*
+1. **Moderation content logging — ✅ REMEDIATED (2026-08-06).** `content_filter.py`
+   previously logged a 300-char preview of student text. It now logs **decision
+   metadata only** (timestamp, surface, `text_len`, action, categories) — no
+   student content at rest. Content logging is an explicit dev-only opt-in
+   (`log_content=True`), off by default and never enabled on the edu/production
+   path. `logs/#6` in the table above is now content-free.
 2. **Retention & deletion.** Define concrete retention for #1, #4, #6, #8 and a
    deletion path (ties to the takedown runbook in `01_...`). The Knowledge Library
    (#4, on e2) is the main student-data store needing a delete endpoint.
