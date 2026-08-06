@@ -68,6 +68,7 @@ ESCALATE_CATEGORIES = {"self_harm", "abuse_disclosure"}
 BLOCK_CATEGORIES = {
     "sexual", "violence", "harassment", "hate", "dangerous",
     "self_harm", "abuse_disclosure",  # also block the normal flow
+    "unsafe",  # generic block verdict from the ShieldGemma model backend
 }
 
 

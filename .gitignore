@@ -27,3 +27,5 @@ serve_vllm_active.sh
 *.7b-backup
 venv-g4/
 serve_vllm_active.sh.qwen-rollback
+llama.cpp/build-cuda/
+models/shieldgemma-2b-gguf/

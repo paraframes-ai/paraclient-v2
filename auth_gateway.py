@@ -36,7 +36,8 @@ from pathlib import Path
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fastapi import HTTPException  # noqa: E402  (module-level: used by resolve_version)
-from content_filter import ContentFilter, Action  # noqa: E402
+from content_filter import ContentFilter, Action, HeuristicBackend  # noqa: E402
+from moderation import ShieldGemmaBackend, CompositeBackend  # noqa: E402
 import generate_media as gm  # noqa: E402
 from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
                         repair_sketch, floorplan_issues)
@@ -229,7 +230,10 @@ def build_app(tutor_url: str, tutor_key: str):
 
     app = FastAPI(title="ParaFrames API Gateway (dev scaffold)")
     tutor = OpenAI(base_url=tutor_url, api_key=tutor_key)
-    filt = ContentFilter()
+    # Real on-prem moderation: instant heuristic (self-harm/abuse escalation) +
+    # ShieldGemma-2B per-policy classifier (nuanced block-harms). Fails closed.
+    filt = ContentFilter(backend=CompositeBackend(
+        [HeuristicBackend(), ShieldGemmaBackend()]))
     keys = load_keys()
     rl = RateLimiter()
 
