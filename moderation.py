@@ -99,15 +99,19 @@ class ShieldGemmaBackend(ModerationBackend):
         return self._p_yes(r.json())
 
     def classify(self, text: str, surface: str) -> set:
+        # Screens both student INPUT and tutor OUTPUT. The 4 K-12 policy checks
+        # run CONCURRENTLY against the --parallel guard server, so each screen is
+        # ~1s on CPU (negligible vs the tutor's own generation time).
         if not isinstance(text, str) or not text.strip():
             return set()
+        from concurrent.futures import ThreadPoolExecutor
         try:
-            for label, policy in POLICIES:
-                if self._score(text, surface, policy) >= self.threshold:
-                    return {label}       # short-circuit: one violation blocks
+            with ThreadPoolExecutor(max_workers=len(POLICIES)) as ex:
+                scored = list(ex.map(
+                    lambda lp: (lp[0], self._score(text, surface, lp[1])), POLICIES))
         except Exception:  # noqa: BLE001 — fail CLOSED (see module docstring)
             return {"_moderation_unavailable"}
-        return set()
+        return {label for label, score in scored if score >= self.threshold}
 
 
 class CompositeBackend(ModerationBackend):
