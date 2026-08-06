@@ -49,6 +49,9 @@ from civics_agent import answer_time_varying  # noqa: E402
 from spreadsheet_schema import (SPREADSHEET_SYS, spreadsheet_issues,  # noqa: E402
                                 clean_spreadsheet, evaluate_sheet)
 from gemini_backend import generate as gemini_generate  # noqa: E402
+from claude_backend import (generate as claude_generate,  # noqa: E402
+                            FREE_MODEL as CLAUDE_FREE_MODEL,
+                            PAID_MODEL as CLAUDE_PAID_MODEL)
 
 KEYSTORE = Path(__file__).with_name("gateway_keys.json")
 
@@ -689,6 +692,68 @@ def build_app(tutor_url: str, tutor_key: str):
         return JSONResponse({"role": "assistant", "content": text, "model": used,
                              "provider": "google-vertex",
                              "safety": {"action": dout.action.value}})
+
+    async def _claude_route(request: Request, rec: dict, model: str, tier_label: str):
+        """Shared handler for the Claude-via-Vertex routes. Off-box, so edu is
+        blocked; input + output still pass the safety filter."""
+        if rec["audience"] not in ("consumer", "internal"):
+            raise HTTPException(
+                403, "Claude routes are not available to the 'edu' audience "
+                     "(student data must stay on-prem; use the local tutor)")
+        body = await request.json()
+        messages = body.get("messages")
+        if not messages:
+            prompt = (body.get("prompt") or "").strip()
+            if not prompt:
+                raise HTTPException(400, "messages or prompt required")
+            messages = [{"role": "user", "content": prompt}]
+        if body.get("system"):
+            messages = ([{"role": "system", "content": body["system"]}]
+                        + [m for m in messages if m.get("role") != "system"])
+        user_turns = [m for m in messages if m.get("role") == "user"]
+        latest = user_turns[-1]["content"] if user_turns else ""
+        din = filt.screen_input(latest if isinstance(latest, str) else "")
+        if din.action != Action.ALLOW:
+            return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
+        try:
+            text, used = claude_generate(
+                messages, model=model,
+                max_tokens=int(body.get("max_tokens", 2048)))
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if any(s in msg for s in ("SCOPE", "PERMISSION_DENIED", "403",
+                                      "credentials", "default credentials")):
+                raise HTTPException(
+                    503, "Claude (Vertex) auth not configured — same setup as "
+                         "/v1/gemini (ADC with cloud-platform scope + aiplatform "
+                         f"API enabled). Detail: {msg[:200]}")
+            raise HTTPException(502, f"Claude call failed: {msg[:200]}")
+        dout = filt.screen_output(text)
+        if dout.action != Action.ALLOW:
+            text = dout.student_message
+        return JSONResponse({"role": "assistant", "content": text, "model": used,
+                             "provider": "anthropic-vertex", "tier": tier_label,
+                             "safety": {"action": dout.action.value}})
+
+    @app.post("/v1/claude-free")
+    async def claude_free(request: Request,
+                          authorization: str | None = Header(None)):
+        """Claude Sonnet via Vertex — the free external-Claude tier. Any
+        non-edu audience may use it."""
+        rec = auth(authorization)
+        return await _claude_route(request, rec, CLAUDE_FREE_MODEL, "free")
+
+    @app.post("/v1/claude-paid")
+    async def claude_paid(request: Request,
+                          authorization: str | None = Header(None)):
+        """Claude Opus via Vertex — the paid external-Claude tier. Requires the
+        paid/dev tier (Opus is the premium, higher-cost model)."""
+        rec = auth(authorization)
+        if tier_of(rec) not in ("paid", "dev"):
+            raise HTTPException(
+                402, "Claude Opus (paid tier) requires a paid plan "
+                     f"(your tier: {tier_of(rec)})")
+        return await _claude_route(request, rec, CLAUDE_PAID_MODEL, "paid")
 
     @app.post("/v1/embed")
     async def embed(request: Request, authorization: str | None = Header(None)):
