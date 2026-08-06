@@ -104,6 +104,9 @@ VERSION_ACCESS = {
     "v4": {"paid", "dev"},          # premium: GPU + multimodal, paid/dev/edu
 }
 PREFERRED_VERSION_ORDER = ("v4", "v3", "v2")   # best first, for defaulting
+# Per-tier default: paid/dev get v4 (GPU); free defaults to v2 (7B, responsive
+# on CPU) rather than v3 (14B, ~2-4 tok/s) — v3 is opt-in for free users.
+DEFAULT_VERSION_BY_TIER = {"free": "v2", "paid": "v4", "dev": "v4"}
 VERSION_MODEL = {"v2": "paraclient-v2", "v3": "paraclient-v3"}  # CPU llama.cpp names
 
 
@@ -134,7 +137,10 @@ def resolve_version(rec: dict, requested: str | None) -> str:
             raise HTTPException(
                 402, f"model {rv} requires a paid plan (your tier: {tier})")
         return rv
-    for v in PREFERRED_VERSION_ORDER:   # default to the best the tier allows
+    default = DEFAULT_VERSION_BY_TIER.get(tier)
+    if default and default in allowed:
+        return default
+    for v in PREFERRED_VERSION_ORDER:   # fallback: best the tier allows
         if v in allowed:
             return v
     raise HTTPException(403, "no model versions available for this account")
