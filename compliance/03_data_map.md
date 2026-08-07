@@ -48,9 +48,14 @@ tutoring; external LLM providers are used **only** on the paid consumer lane and
    student content at rest. Content logging is an explicit dev-only opt-in
    (`log_content=True`), off by default and never enabled on the edu/production
    path. `logs/#6` in the table above is now content-free.
-2. **Retention & deletion.** Define concrete retention for #1, #4, #6, #8 and a
-   deletion path (ties to the takedown runbook in `01_...`). The Knowledge Library
-   (#4, on e2) is the main student-data store needing a delete endpoint.
+2. **Retention & deletion — ⏳ PARTIALLY REMEDIATED (2026-08-07).** A right-to-
+   erasure endpoint now exists: `POST /v1/account/delete` revokes the user's
+   access key(s) + clears local state on the L4, writes a metadata-only audit
+   entry (`logs/erasure_audit.jsonl`), and triggers the e2 Knowledge-Library purge
+   if `KL_DELETE_URL` is set. Self-service (delete own account) + internal/service
+   named-delete (the under-13 takedown path). **Still to do:** (a) implement the
+   e2 side — the KL embeddings + account record live on e2, so wire `KL_DELETE_URL`
+   to a real e2 purge endpoint; (b) define concrete retention windows for #6/#8.
 3. **Access control / audit.** Per-user keys are a static JSON keystore; there's
    no per-access audit trail (FERPA expects one). *(Offered as a follow-on build.)*
 4. **Encryption at rest.** Transit is WireGuard-encrypted; confirm `<FILL: disk

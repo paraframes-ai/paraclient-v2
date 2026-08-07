@@ -206,6 +206,28 @@ def load_keys() -> dict:
     return seed
 
 
+def save_keys(keys: dict) -> None:
+    """Persist the keystore after a mutation (e.g. account deletion)."""
+    KEYSTORE.write_text(json.dumps(keys, indent=2))
+
+
+def erasure_audit(user: str, keys_removed: int, requested_by: str,
+                  kl_status: str) -> None:
+    """Append a metadata-only record of a data-deletion (right-to-erasure /
+    under-13 takedown). No content — just that an erasure happened, for whom,
+    when, and by whom. Doubles as the deletion audit trail."""
+    rec = {"ts": time.time(), "event": "account_erasure", "user": user,
+           "keys_removed": keys_removed, "requested_by": requested_by,
+           "knowledge_library_purge": kl_status}
+    try:
+        log = Path(__file__).with_name("logs") / "erasure_audit.jsonl"
+        log.parent.mkdir(exist_ok=True)
+        with open(log, "a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except Exception:  # noqa: BLE001 — audit logging must never break the request
+        pass
+
+
 class RateLimiter:
     """In-memory sliding-window per key. Scaffold only — not durable."""
     def __init__(self):
@@ -353,6 +375,61 @@ def build_app(tutor_url: str, tutor_key: str):
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
                 "tier": tier_of(rec), "allowed_versions": versions_for(rec)}
+
+    @app.post("/v1/account/delete")
+    async def account_delete(request: Request,
+                             authorization: str | None = Header(None)):
+        """Right-to-erasure / under-13 takedown. Deletes what the L4 holds for a
+        user (their access key(s) + rate-limit state), records a metadata-only
+        audit entry, and triggers the e2 Knowledge-Library purge if configured.
+
+        By default a caller deletes their OWN account (the key they present). An
+        internal/service caller (e.g. e2) may delete a named user by passing
+        {"user": "<id>"} — used for the coordinated erasure and the under-13
+        takedown. A normal user cannot delete anyone else."""
+        _, rec = lookup(authorization)   # authenticate; deletion is not rate-limited
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — empty body = self-delete
+            body = {}
+        target = body.get("user")
+        if target and target != rec.get("user"):
+            if rec.get("audience") != "internal":
+                raise HTTPException(
+                    403, "only an internal/service caller may delete another "
+                         "user's account")
+            user = target
+        else:
+            user = rec.get("user")
+        if not user:
+            raise HTTPException(400, "no user associated with this request")
+
+        removed = [k for k, v in keys.items() if v.get("user") == user]
+        for k in removed:
+            keys.pop(k, None)
+            rl._hits.pop(k, None)
+        save_keys(keys)
+
+        # Best-effort: tell e2 to purge this user's Knowledge Library + record.
+        kl_status = "e2_purge_not_configured"
+        kl_url = os.environ.get("KL_DELETE_URL")
+        if kl_url:
+            try:
+                import httpx
+                httpx.post(kl_url, json={"user": user}, timeout=15)
+                kl_status = "e2_purge_requested"
+            except Exception as e:  # noqa: BLE001
+                kl_status = f"e2_purge_failed: {e}"
+
+        erasure_audit(user, len(removed), requested_by=rec.get("user"),
+                      kl_status=kl_status)
+        return JSONResponse({
+            "deleted": True, "user": user, "keys_removed": len(removed),
+            "knowledge_library_purge": kl_status,
+            "note": ("L4 revoked access and cleared local state. The Knowledge "
+                     "Library embeddings and account record live on e2 and must "
+                     "be purged there — set KL_DELETE_URL or have e2 complete the "
+                     "erasure.")})
 
     @app.post("/v1/chat")
     async def chat(request: Request, authorization: str | None = Header(None)):
