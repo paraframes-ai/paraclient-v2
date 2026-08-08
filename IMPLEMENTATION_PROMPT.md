@@ -93,6 +93,7 @@ Right to erasure. Empty body = delete self. **Require an explicit typed confirma
 | Context window | 4k | 8k | 16k | 16k |
 | Queue priority | 10 | 5 | 0 (first) | 0 |
 | Model versions | v2, v3 (CPU) | + v4 (GPU) | + v4 (GPU) | all |
+| External models (Gemini/Claude) | no | **no** | **yes** | yes |
 
 Build a plan/usage screen from `/v1/account/me`. Show a usage meter with the reset
 date (`usage.period` is `YYYY-MM`; it resets at the start of next month). Handle
@@ -146,10 +147,13 @@ POST /v1/3d           3D CAD → positioned primitives / CSG
 POST /v1/circuit      netlist (grammar-constrained + ERC-checked)
 POST /v1/spreadsheet  {mode: generate|tutor} — formula-gated
 POST /v1/civics       static adapter + live .gov-sourced answers
-POST /v1/notes        handwriting / math transcription (image; needs v4)
-POST /v1/gemini       third-party — paid tiers only
-POST /v1/claude-free  Sonnet — paid tiers only
-POST /v1/claude-paid  Opus — paid tiers only
+POST /v1/notes        handwriting / math transcription (image). Optional
+                      {backend: "paraclient"|"gemini"|"claude"} — default
+                      paraclient (on-prem). gemini/claude are Premiere/Dev only
+                      and never available to edu; response carries `on_prem`.
+POST /v1/gemini       third-party (Vertex) — Premiere/Dev only (NOT Plus)
+POST /v1/claude-free  Sonnet (Vertex)      — Premiere/Dev only (NOT Plus)
+POST /v1/claude-paid  Opus (Vertex)        — Premiere/Dev only (NOT Plus)
 POST /v1/embed        embeddings for the Knowledge Library
 GET  /healthz
 ```

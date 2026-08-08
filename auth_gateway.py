@@ -115,8 +115,17 @@ def model_for(mode: str, subject: str) -> str:
 TIERS = ("free", "plus", "premiere", "dev")
 TIER_LABEL = {"free": "Free", "plus": "Plus", "premiere": "Premiere",
               "dev": "Dev", "paid": "Plus"}
-# Every tier above free may reach the GPU + third-party models.
+# Every tier above free may reach the GPU (v4 / Kalvi 4).
 PAID_TIERS = {"plus", "premiere", "dev", "paid"}
+
+# The off-box, third-party models (Gemini / Claude on Vertex) are a Premiere
+# perk, NOT a general paid perk: Plus reaches v4 on the GPU but not the external
+# providers. "paid" is the legacy alias of Plus, so it is deliberately excluded.
+EXTERNAL_MODEL_TIERS = {"premiere", "dev"}
+
+
+def can_use_external(rec: dict) -> bool:
+    return tier_of(rec) in EXTERNAL_MODEL_TIERS
 
 VERSION_ACCESS = {
     "v2": {"free"} | PAID_TIERS,
@@ -666,6 +675,7 @@ def build_app(tutor_url: str, tutor_key: str):
                 "rpm": rpm_for(rec),
                 "max_context": max_context_for(rec),
                 "queue_priority": priority_for(rec),
+                "external_models": can_use_external(rec),
                 "sessions": {"active": accounts.active_sessions(rec.get("user")),
                              "limit": max_sessions_for(rec)},
                 "usage": _usage_block(rec)}
@@ -1121,10 +1131,10 @@ def build_app(tutor_url: str, tutor_key: str):
                 raise HTTPException(
                     403, "edu note transcription stays on-prem; the third-party "
                          "backends are not available for school accounts")
-            if tier_of(rec) not in PAID_TIERS:
+            if not can_use_external(rec):
                 raise HTTPException(
-                    402, f"the {backend} backend requires a paid plan "
-                         f"(your tier: {tier_of(rec)})")
+                    402, f"the {backend} backend is a Premiere feature "
+                         f"(your plan: {TIER_LABEL.get(tier_of(rec), 'Free')})")
 
         try:
             if backend == "gemini":
@@ -1186,10 +1196,10 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(
                 403, "the Gemini route is not available to the 'edu' audience "
                      "(student data must stay on-prem; use the local tutor)")
-        if tier_of(rec) not in PAID_TIERS:
+        if not can_use_external(rec):
             raise HTTPException(
-                402, "external models (Gemini) require a paid plan "
-                     f"(your tier: {tier_of(rec)})")
+                402, "external models (Gemini) are a Premiere feature "
+                     f"(your plan: {TIER_LABEL.get(tier_of(rec), 'Free')})")
         body = await request.json()
         messages = body.get("messages")
         if not messages:
@@ -1234,10 +1244,10 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(
                 403, "Claude routes are not available to the 'edu' audience "
                      "(student data must stay on-prem; use the local tutor)")
-        if tier_of(rec) not in PAID_TIERS:
+        if not can_use_external(rec):
             raise HTTPException(
-                402, "external Claude models require a paid plan "
-                     f"(your tier: {tier_of(rec)})")
+                402, "external Claude models are a Premiere feature "
+                     f"(your plan: {TIER_LABEL.get(tier_of(rec), 'Free')})")
         body = await request.json()
         messages = body.get("messages")
         if not messages:

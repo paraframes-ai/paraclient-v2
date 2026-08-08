@@ -286,6 +286,17 @@ with accounts._connect() as con:
                        (m["user"],)).fetchone()["c"]
 check("deleting an account erases its usage rows", left == 0, f"{left} left")
 
+print("\n=== external models (Gemini/Claude) are Premiere+Dev only ===")
+check("premiere can use external models", gw.can_use_external({"tier": "premiere"}))
+check("dev can use external models", gw.can_use_external({"tier": "dev"}))
+check("plus CANNOT use external models", not gw.can_use_external({"tier": "plus"}))
+check("legacy 'paid' (=Plus) CANNOT use external models",
+      not gw.can_use_external({"tier": "paid"}))
+check("free CANNOT use external models", not gw.can_use_external({"tier": "free"}))
+# External access must be STRICTER than GPU access, not equal to it.
+check("plus reaches the GPU (v4) but not external models",
+      "v4" in gw.versions_for_tier("plus") and not gw.can_use_external({"tier": "plus"}))
+
 print("\n=== premiere perks: sessions, context, queue priority ===")
 for tier, want in [("free", 50), ("plus", 100), ("premiere", 1000)]:
     got = gw.max_sessions_for({"tier": tier})
