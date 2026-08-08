@@ -52,6 +52,30 @@ def split_system(messages: list):
     return ("\n".join(system_parts) or None), convo
 
 
+def generate_vision(data_uri: str, prompt: str, system: str | None = None,
+                    model: str | None = None, max_tokens: int = 1500):
+    """Single-image + text call (used by /v1/notes transcription).
+
+    Claude takes the image as a base64 content block alongside the text, so the
+    data: URI is split back into media_type + payload. No sampling params, for
+    the same reason as generate()."""
+    client = _get_client()
+    header, _, payload = data_uri.partition(",")
+    media_type = header[5:].split(";")[0] or "image/png"
+    content = [
+        {"type": "image", "source": {"type": "base64",
+                                     "media_type": media_type, "data": payload}},
+        {"type": "text", "text": prompt},
+    ]
+    kwargs = {"model": model or FREE_MODEL, "max_tokens": int(max_tokens),
+              "messages": [{"role": "user", "content": content}]}
+    if system:
+        kwargs["system"] = system
+    resp = client.messages.create(**kwargs)
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    return text, kwargs["model"]
+
+
 def generate(messages: list, model: str, max_tokens: int = 2048):
     """Call Claude on Vertex. Returns (text, model_used). Raises on failure so
     the route can surface a clear error (e.g. Vertex auth / API not enabled).

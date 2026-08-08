@@ -85,9 +85,18 @@ def normalize_image(image: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
 
 
+def notes_prompt(hint: str = "") -> str:
+    """The user-turn text for a transcription call.
+
+    Shared by every backend so the local VLM, Gemini and Claude are all asked
+    for exactly the same thing — otherwise the three would drift apart and a
+    transcription would depend on which one served it."""
+    return ("Transcribe this handwritten page. " + (hint or "")).strip()
+
+
 def notes_messages(data_uri: str, hint: str = "") -> list:
     """OpenAI-format multimodal messages for the VLM transcription call."""
-    text = ("Transcribe this handwritten page. " + hint).strip()
+    text = notes_prompt(hint)
     return [
         {"role": "system", "content": NOTES_SYS},
         {"role": "user", "content": [

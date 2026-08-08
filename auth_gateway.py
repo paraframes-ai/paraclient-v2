@@ -36,6 +36,9 @@ from pathlib import Path
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fastapi import HTTPException  # noqa: E402  (module-level: used by resolve_version)
+# The Vertex SDKs are blocking; run them off the event loop so one slow
+# third-party transcription cannot stall every other in-flight request.
+from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from content_filter import ContentFilter, Action, HeuristicBackend  # noqa: E402
 from moderation import ShieldGemmaBackend, CompositeBackend  # noqa: E402
 import accounts  # noqa: E402  (SQLite account store: age gate, signup, login)
@@ -45,13 +48,15 @@ from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
 from circuit_schema import (CIRCUIT_SYS, erc as circuit_erc,  # noqa: E402
                             clean as circuit_clean)
 from notes_schema import (normalize_image, notes_messages,  # noqa: E402
-                          clean_transcription)
+                          notes_prompt, clean_transcription, NOTES_SYS)
 from civics_schema import sys_for as civics_sys, is_time_varying  # noqa: E402
 from civics_agent import answer_time_varying  # noqa: E402
 from spreadsheet_schema import (SPREADSHEET_SYS, spreadsheet_issues,  # noqa: E402
                                 clean_spreadsheet, evaluate_sheet)
-from gemini_backend import generate as gemini_generate  # noqa: E402
+from gemini_backend import (generate as gemini_generate,  # noqa: E402
+                            generate_vision as gemini_vision)
 from claude_backend import (generate as claude_generate,  # noqa: E402
+                            generate_vision as claude_vision,
                             FREE_MODEL as CLAUDE_FREE_MODEL,
                             PAID_MODEL as CLAUDE_PAID_MODEL)
 
@@ -305,6 +310,11 @@ BASE_MODEL = "ParaFrames/ParaClient-v2.2"
 # becomes vision-capable after the v4 cutover, so until then the route returns a
 # clear 503 instead of a wrong answer.
 NOTES_MODEL = os.environ.get("NOTES_MODEL", BASE_MODEL)
+
+# /v1/notes may be served by the local VLM or, for paid consumer keys, by a
+# third-party VLM on Vertex. "paraclient" is the default because it is the only
+# one where the page never leaves the box; the others are opt-in per request.
+NOTES_BACKENDS = {"paraclient", "gemini", "claude"}
 
 # Civics has TWO answer paths (see /v1/civics): static civic knowledge is served
 # by the dedicated civics adapter; time-varying facts (current office-holders,
@@ -1094,23 +1104,73 @@ def build_app(tutor_url: str, tutor_key: str):
             din = filt.screen_input(hint)
             if din.action != Action.ALLOW:
                 return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
-        try:
-            resp = tutor.chat.completions.create(
-                model=NOTES_MODEL, messages=notes_messages(data_uri, hint),
-                max_tokens=int(body.get("max_tokens", 1500)),
-                temperature=float(body.get("temperature", 0.0)))
-            text = clean_transcription(resp.choices[0].message.content)
-        except Exception as e:  # noqa: BLE001
-            # The base model is not vision-capable until the ParaClient-v4
-            # (Gemma 4V) cutover — surface that clearly rather than a 502.
+
+        backend = str(body.get("backend", "paraclient")).strip().lower()
+        if backend not in NOTES_BACKENDS:
             raise HTTPException(
-                503, "note transcription needs the multimodal ParaClient-v4 "
-                     f"(Gemma 4V) backend, which is not serving yet: {e}")
+                400, f"unknown backend {backend!r} (choose one of "
+                     f"{', '.join(sorted(NOTES_BACKENDS))})")
+
+        # A photo of a student's own notebook is about as personal as this
+        # product gets, so sending it off-box is an explicit, gated choice.
+        if backend != "paraclient":
+            # Belt and braces. `edu` cannot reach this route at all (it lacks
+            # the 'normal' mode checked above), but a child's handwriting must
+            # never leave the box even if that mode policy is ever loosened.
+            if rec.get("audience") == "edu":
+                raise HTTPException(
+                    403, "edu note transcription stays on-prem; the third-party "
+                         "backends are not available for school accounts")
+            if tier_of(rec) not in PAID_TIERS:
+                raise HTTPException(
+                    402, f"the {backend} backend requires a paid plan "
+                         f"(your tier: {tier_of(rec)})")
+
+        try:
+            if backend == "gemini":
+                text, used = await run_in_threadpool(
+                    gemini_vision, data_uri, notes_prompt(hint), NOTES_SYS,
+                    None, int(body.get("max_tokens", 1500)), 0.0)
+            elif backend == "claude":
+                text, used = await run_in_threadpool(
+                    claude_vision, data_uri, notes_prompt(hint), NOTES_SYS,
+                    CLAUDE_PAID_MODEL if body.get("model") == "opus"
+                    else CLAUDE_FREE_MODEL,
+                    int(body.get("max_tokens", 1500)))
+            else:
+                resp = tutor.chat.completions.create(
+                    model=NOTES_MODEL, messages=notes_messages(data_uri, hint),
+                    max_tokens=int(body.get("max_tokens", 1500)),
+                    temperature=float(body.get("temperature", 0.0)))
+                text, used = resp.choices[0].message.content, NOTES_MODEL
+            text = clean_transcription(text)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            if backend == "paraclient":
+                # The base model is not vision-capable until the ParaClient-v4
+                # (Gemma 4V) cutover — surface that clearly rather than a 502.
+                raise HTTPException(
+                    503, "note transcription needs the multimodal ParaClient-v4 "
+                         f"(Gemma 4V) backend, which is not serving yet: {e}")
+            msg = str(e)
+            # Same diagnosis the /v1/gemini and /v1/claude-* routes give, so a
+            # missing Vertex setup reads the same wherever it is hit.
+            if any(s in msg for s in ("SCOPE", "PERMISSION_DENIED", "403",
+                                      "credentials", "default credentials")):
+                raise HTTPException(
+                    503, f"{backend} (Vertex) auth not configured. Needs ADC with "
+                         "cloud-platform scope, the aiplatform API enabled, and "
+                         f"roles/aiplatform.user. Detail: {msg[:200]}")
+            raise HTTPException(502, f"{backend} transcription failed: {msg[:200]}")
+
         dout = filt.screen_output(text)
         if dout.action != Action.ALLOW:
             text = dout.student_message
         return JSONResponse({"text": text, "format": "markdown+latex",
-                             "needs_confirmation": True, "model": NOTES_MODEL,
+                             "needs_confirmation": True, "model": used,
+                             "backend": backend,
+                             "on_prem": backend == "paraclient",
                              "safety": {"action": dout.action.value}})
 
     @app.post("/v1/gemini")

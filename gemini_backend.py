@@ -49,6 +49,39 @@ def to_gemini(messages: list):
     return system, contents
 
 
+def _split_data_uri(data_uri: str):
+    """'data:image/png;base64,AAA' -> ('image/png', raw_bytes)."""
+    import base64
+    header, _, payload = data_uri.partition(",")
+    mime = header[5:].split(";")[0] or "image/png"   # strip the leading 'data:'
+    return mime, base64.b64decode(payload)
+
+
+def generate_vision(data_uri: str, prompt: str, system: str | None = None,
+                    model: str | None = None, max_tokens: int = 1500,
+                    temperature: float = 0.0):
+    """Single-image + text call (used by /v1/notes transcription).
+
+    Kept separate from generate() because the vision path takes one validated
+    image and a prompt, not a chat history — folding it into the message
+    converter would mean inventing an image-carrying message shape that nothing
+    else uses."""
+    from google.genai import types
+    client = _get_client()
+    mime, raw = _split_data_uri(data_uri)
+    parts = [types.Part.from_bytes(data=raw, mime_type=mime),
+             types.Part(text=prompt)]
+    cfg = types.GenerateContentConfig(
+        max_output_tokens=int(max_tokens),
+        temperature=float(temperature),
+        system_instruction=system,
+    )
+    used = model or DEFAULT_MODEL
+    resp = client.models.generate_content(
+        model=used, contents=[types.Content(role="user", parts=parts)], config=cfg)
+    return (resp.text or ""), used
+
+
 def generate(messages: list, model: str | None = None,
              max_tokens: int = 800, temperature: float = 0.7):
     """Call Gemini on Vertex. Returns (text, model_used). Raises on failure so
