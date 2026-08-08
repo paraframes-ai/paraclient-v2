@@ -46,11 +46,11 @@ TIERS (interim, pre-billing)
   billing integration yet, so tier is decided by DEPLOYMENT ENVIRONMENT rather
   than by a plan the user bought:
       PARACLIENT_ENV=dev  (default) -> new accounts get tier "dev"
-      PARACLIENT_ENV=prod           -> new accounts get tier "plus"
-  This keeps production users on a paid tier while payments do not exist, and
-  keeps dev boxes clearly labelled. When billing lands, `default_tier()` is the
-  single function that changes: real accounts start "free" and are promoted on
-  successful payment.
+      PARACLIENT_ENV=prod           -> new accounts get tier "free"
+  Everyone starts on Free and is promoted by a payment once billing exists, so
+  no early cohort silently holds a paid tier it never bought (and nothing has
+  to be taken away from them later). Free is also capped at v2/v3 on CPU, so a
+  self-serve signup cannot queue work on the single GPU.
 """
 from __future__ import annotations
 
@@ -172,16 +172,20 @@ def init_db() -> None:
 # --------------------------------------------------------------------------
 
 def default_tier() -> str:
-    """Interim tier policy: dev boxes mint dev accounts, production mints plus.
+    """Tier a brand-new account starts on: free in production, dev on a dev box.
 
-    Pre-billing there is no way to *buy* anything, so production users get a
-    paid tier rather than being gated behind a plan that cannot be purchased.
-    Plus (not Premiere) is the entry paid tier, so it is the conservative
-    default to hand out for free. This is the one function to change when
-    payments land: new accounts become "free" and are promoted to plus/premiere
-    on a successful charge."""
+    Everyone signs up on Free and is promoted by a successful payment, so the
+    plan ladder means the same thing before and after billing exists -- no
+    cohort of early users silently holds a paid tier they never bought, and
+    nothing has to be taken away from them later.
+
+    It also keeps free signups off the GPU: Free is capped at v2/v3 (CPU), so a
+    self-serve signup cannot queue work on the single L4.
+
+    When billing lands, this function stays as it is; the promotion path is a
+    separate call that sets tier to plus/premiere on a successful charge."""
     env = os.environ.get("PARACLIENT_ENV", "dev").strip().lower()
-    return "plus" if env in ("prod", "production") else "dev"
+    return "free" if env in ("prod", "production") else "dev"
 
 
 def _hash_password(password: str, salt: bytes | None = None):

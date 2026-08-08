@@ -75,10 +75,10 @@ check("account created", acct["user"].startswith("u_"))
 check("email is normalised", acct["email"] == "founder@paraframes.org")
 check("api key returned once", acct["api_key"].startswith("pk-"))
 
-# The user's requirement: dev env -> dev tier, prod env -> paid tier.
+# Tier policy: dev boxes mint dev accounts, production mints free accounts.
 check("dev env mints tier 'dev'", acct["tier"] == "dev", acct["tier"])
 os.environ["PARACLIENT_ENV"] = "prod"
-check("prod env mints a paid tier", accounts.default_tier() == "plus")
+check("prod env mints the free tier", accounts.default_tier() == "free")
 os.environ["PARACLIENT_ENV"] = "dev"
 
 print("\n=== gate token cannot be bypassed or reused ===")
@@ -222,7 +222,10 @@ check("unknown tier falls back to free",
       gw.storage_bytes_for({"tier": "bogus"}) == 128 * GB)
 
 os.environ["PARACLIENT_ENV"] = "prod"
-check("prod signups get the Plus tier", accounts.default_tier() == "plus")
+check("prod signups get the Free tier", accounts.default_tier() == "free")
+# A self-serve signup must not be able to queue work on the single GPU.
+check("a prod signup cannot reach v4 (GPU) without paying",
+      "v4" not in gw.versions_for_tier(accounts.default_tier()))
 os.environ["PARACLIENT_ENV"] = "dev"
 
 print("\n=== product naming: Kalvi (edu) vs ParaClient (consumer) ===")
