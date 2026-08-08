@@ -154,6 +154,16 @@ def init_db() -> None:
             tokens   INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, period)
         );
+        -- Concurrent active sessions, capped per tier. Sessions expire on idle
+        -- (SESSION_IDLE_TTL) so a crashed client cannot leak one of a user's
+        -- slots forever; there is no reaper process to keep alive.
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL,
+            opened_at  REAL NOT NULL,
+            last_seen  REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         """)
 
 
@@ -431,6 +441,67 @@ def reset_usage(user_id: str) -> None:
                     (user_id, current_period()))
 
 
+# --------------------------------------------------------------------------
+# Concurrent sessions
+# --------------------------------------------------------------------------
+
+SESSION_IDLE_TTL = float(os.environ.get("SESSION_IDLE_TTL", 30 * 60))
+
+
+def _prune_sessions(con, user_id: str | None = None) -> None:
+    """Drop idle-expired sessions. Called before any count so an abandoned
+    client never permanently occupies one of a user's slots."""
+    cutoff = time.time() - SESSION_IDLE_TTL
+    if user_id:
+        con.execute("DELETE FROM sessions WHERE last_seen < ? AND user_id = ?",
+                    (cutoff, user_id))
+    else:
+        con.execute("DELETE FROM sessions WHERE last_seen < ?", (cutoff,))
+
+
+def active_sessions(user_id: str) -> int:
+    with _connect() as con:
+        _prune_sessions(con, user_id)
+        return con.execute("SELECT COUNT(*) c FROM sessions WHERE user_id=?",
+                           (user_id,)).fetchone()["c"]
+
+
+def open_session(user_id: str, max_active: int | None) -> dict:
+    """Claim a session slot. `max_active=None` means unlimited (dev).
+
+    Raises 429 when the user is already at their tier's cap — the caller should
+    close an old session or wait for one to idle out."""
+    now = time.time()
+    with _connect() as con:
+        _prune_sessions(con, user_id)
+        n = con.execute("SELECT COUNT(*) c FROM sessions WHERE user_id=?",
+                        (user_id,)).fetchone()["c"]
+        if max_active is not None and n >= max_active:
+            raise AccountError(
+                429, f"all {max_active} concurrent sessions are in use — close "
+                     f"one or wait for an idle session to expire")
+        sid = "s_" + secrets.token_urlsafe(18)
+        con.execute("INSERT INTO sessions(session_id,user_id,opened_at,last_seen)"
+                    " VALUES (?,?,?,?)", (sid, user_id, now, now))
+    return {"session_id": sid, "active": n + 1, "limit": max_active,
+            "idle_ttl": SESSION_IDLE_TTL}
+
+
+def touch_session(session_id: str) -> bool:
+    """Heartbeat — keeps a session from idling out."""
+    with _connect() as con:
+        cur = con.execute("UPDATE sessions SET last_seen=? WHERE session_id=?",
+                          (time.time(), session_id))
+    return cur.rowcount > 0
+
+
+def close_session(session_id: str) -> bool:
+    with _connect() as con:
+        cur = con.execute("DELETE FROM sessions WHERE session_id=?",
+                          (session_id,))
+    return cur.rowcount > 0
+
+
 def get_account(user_id: str) -> dict | None:
     with _connect() as con:
         row = con.execute(
@@ -468,9 +539,10 @@ def delete_account(user_id: str) -> int:
                         (user_id,)).fetchone()["c"]
         con.execute("DELETE FROM api_keys WHERE user_id=?", (user_id,))
         con.execute("DELETE FROM accounts WHERE user_id=?", (user_id,))
-        # Usage rows are keyed by user_id, not FK-cascaded — erase them too, or
-        # deletion would leave per-user records behind.
+        # Usage and session rows are keyed by user_id, not FK-cascaded — erase
+        # them too, or deletion would leave per-user records behind.
         con.execute("DELETE FROM usage WHERE user_id=?", (user_id,))
+        con.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     return n
 
 

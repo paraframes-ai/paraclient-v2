@@ -265,6 +265,62 @@ with accounts._connect() as con:
                        (m["user"],)).fetchone()["c"]
 check("deleting an account erases its usage rows", left == 0, f"{left} left")
 
+print("\n=== premiere perks: sessions, context, queue priority ===")
+for tier, want in [("free", 50), ("plus", 100), ("premiere", 1000)]:
+    got = gw.max_sessions_for({"tier": tier})
+    check(f"{tier} allows {want} concurrent sessions", got == want, f"got {got}")
+check("dev has unlimited sessions",
+      gw.max_sessions_for({"tier": "dev"}) is None)
+check("legacy 'paid' gets the Plus session cap",
+      gw.max_sessions_for({"tier": "paid"}) == 100)
+
+# Longer context for premiere.
+cf, cp, cpr = (gw.max_context_for({"tier": t})
+               for t in ("free", "plus", "premiere"))
+check("context grows free < plus < premiere", cf < cp < cpr, f"{cf}/{cp}/{cpr}")
+check("premiere gets the server's full 16k window", cpr == 16384, str(cpr))
+
+# Priority: LOWER is handled earlier.
+pf, pp, ppr = (gw.priority_for({"tier": t})
+               for t in ("free", "plus", "premiere"))
+check("premiere outranks plus outranks free in the queue",
+      ppr < pp < pf, f"premiere={ppr} plus={pp} free={pf}")
+check("dev shares premiere's top priority",
+      gw.priority_for({"tier": "dev"}) == ppr)
+
+# Session slots are really enforced and really released.
+g3 = accounts.age_gate(dob_str(25))
+s = accounts.create_account("sess@example.com", "a-long-enough-password",
+                            g3["gate_token"])
+uid = s["user"]
+opened = [accounts.open_session(uid, 3)["session_id"] for _ in range(3)]
+check("sessions open up to the cap", accounts.active_sessions(uid) == 3)
+try:
+    accounts.open_session(uid, 3)
+    check("opening past the cap is refused", False)
+except accounts.AccountError as e:
+    check("opening past the cap is refused", e.status == 429)
+accounts.close_session(opened[0])
+check("closing frees a slot", accounts.active_sessions(uid) == 2)
+check("a slot freed by close can be reused",
+      bool(accounts.open_session(uid, 3)["session_id"]))
+check("heartbeat keeps a session alive", accounts.touch_session(opened[1]))
+check("heartbeat on an unknown session fails",
+      accounts.touch_session("s_nonexistent") is False)
+
+# Idle expiry must reclaim slots, or a crashed client leaks one forever.
+_ttl = accounts.SESSION_IDLE_TTL
+accounts.SESSION_IDLE_TTL = -1          # everything is instantly idle
+check("idle sessions are reclaimed", accounts.active_sessions(uid) == 0)
+accounts.SESSION_IDLE_TTL = _ttl
+
+accounts.open_session(uid, 3)
+accounts.delete_account(uid)
+with accounts._connect() as con:
+    left = con.execute("SELECT COUNT(*) c FROM sessions WHERE user_id=?",
+                       (uid,)).fetchone()["c"]
+check("deleting an account erases its sessions", left == 0, f"{left} left")
+
 print(f"\n{'='*54}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("  FAILED: " + ", ".join(FAIL))

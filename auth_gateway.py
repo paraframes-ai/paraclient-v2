@@ -166,6 +166,39 @@ TIER_MONTHLY_REQUESTS = {
 }
 
 
+# Concurrent active sessions per user. A session is claimed via
+# /v1/session/open and released on close or after SESSION_IDLE_TTL.
+TIER_MAX_SESSIONS = {"free": 50, "plus": 100, "premiere": 1000, "paid": 100}
+
+# Context window per tier. The v4 server is started with --max-model-len 16384,
+# so premiere gets the full window and lower tiers are clamped below it.
+TIER_MAX_CONTEXT = {"free": 4096, "plus": 8192, "premiere": 16384,
+                    "paid": 8192, "dev": 16384}
+
+# vLLM scheduling priority — LOWER IS HANDLED EARLIER. Only has an effect when
+# the server runs with --scheduling-policy priority (see serve_g4_fp8.sh);
+# under the default fcfs policy the field is accepted and ignored, so this is
+# safe to send either way.
+TIER_PRIORITY = {"premiere": 0, "dev": 0, "plus": 5, "paid": 5, "free": 10}
+
+
+def max_sessions_for(rec: dict) -> int | None:
+    tier = tier_of(rec)
+    if tier in UNLIMITED_TIERS:
+        return None
+    return TIER_MAX_SESSIONS.get(tier, TIER_MAX_SESSIONS["free"])
+
+
+def max_context_for(rec: dict) -> int:
+    return TIER_MAX_CONTEXT.get(tier_of(rec), TIER_MAX_CONTEXT["free"])
+
+
+def priority_for(rec: dict) -> int:
+    """Queue priority for this key. Premiere (and dev) jump ahead of plus,
+    which jumps ahead of free, whenever requests contend for the single GPU."""
+    return TIER_PRIORITY.get(tier_of(rec), TIER_PRIORITY["free"])
+
+
 def monthly_quota_for(rec: dict) -> int | None:
     """Requests-per-month allowance, or None if the tier is exempt."""
     tier = tier_of(rec)
@@ -505,7 +538,10 @@ def build_app(tutor_url: str, tutor_key: str):
                 "library_storage_bytes": storage_bytes_for(rec),
                 "library_storage": human_bytes(storage_bytes_for(rec)),
                 "monthly_request_limit": monthly_quota_for(rec),
-                "rpm": rpm_for(rec)}
+                "rpm": rpm_for(rec),
+                "max_sessions": max_sessions_for(rec),
+                "max_context": max_context_for(rec),
+                "queue_priority": priority_for(rec)}
 
     # ---------------- Accounts: age gate -> signup -> login ----------------
     # The gate is a SEPARATE endpoint on purpose: compliance/01 §1 requires the
@@ -589,6 +625,10 @@ def build_app(tutor_url: str, tutor_key: str):
                 "library_storage": human_bytes(storage_bytes_for(rec)),
                 "rate_limited": rpm_for(rec) is not None,
                 "rpm": rpm_for(rec),
+                "max_context": max_context_for(rec),
+                "queue_priority": priority_for(rec),
+                "sessions": {"active": accounts.active_sessions(rec.get("user")),
+                             "limit": max_sessions_for(rec)},
                 "usage": _usage_block(rec)}
 
     def _usage_block(rec: dict) -> dict:
@@ -600,6 +640,54 @@ def build_app(tutor_url: str, tutor_key: str):
                 "requests_remaining": (None if quota is None
                                        else max(0, quota - u["requests"])),
                 "tokens_used": u["tokens"], "unlimited": quota is None}
+
+    @app.post("/v1/session/open")
+    async def session_open(authorization: str | None = Header(None)):
+        """Claim one of this user's concurrent session slots (see
+        TIER_MAX_SESSIONS). 429 when the tier's cap is already in use."""
+        _, rec = lookup(authorization)
+        try:
+            out = accounts.open_session(rec.get("user"), max_sessions_for(rec))
+        except accounts.AccountError as e:
+            return _acct_error(e)
+        return {**out, "plan": TIER_LABEL.get(tier_of(rec), "Free")}
+
+    @app.post("/v1/session/heartbeat")
+    async def session_heartbeat(request: Request,
+                                authorization: str | None = Header(None)):
+        """Keep a session alive. Without a heartbeat a session idles out after
+        SESSION_IDLE_TTL and frees its slot."""
+        lookup(authorization)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        sid = body.get("session_id")
+        if not sid:
+            raise HTTPException(400, "pass {'session_id': '...'}")
+        if not accounts.touch_session(sid):
+            raise HTTPException(404, "unknown or expired session")
+        return {"session_id": sid, "alive": True}
+
+    @app.post("/v1/session/close")
+    async def session_close(request: Request,
+                            authorization: str | None = Header(None)):
+        lookup(authorization)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        sid = body.get("session_id")
+        if not sid:
+            raise HTTPException(400, "pass {'session_id': '...'}")
+        return {"session_id": sid, "closed": accounts.close_session(sid)}
+
+    @app.get("/v1/session/list")
+    async def session_list(authorization: str | None = Header(None)):
+        _, rec = lookup(authorization)
+        return {"active": accounts.active_sessions(rec.get("user")),
+                "limit": max_sessions_for(rec),
+                "idle_ttl": accounts.SESSION_IDLE_TTL}
 
     @app.post("/v1/account/suspend")
     async def account_suspend(request: Request,
@@ -716,11 +804,18 @@ def build_app(tutor_url: str, tutor_key: str):
             client, model = tutor, model_for(mode, subject)
         else:
             client, model = version_client[version], VERSION_MODEL[version]
+        # Tier perks: premiere gets the full context window and jumps the GPU
+        # queue. `priority` is a vLLM extra -- only send it to the v4 (vLLM)
+        # backend; the CPU llama.cpp servers would reject an unknown field.
+        max_tok = max(1, min(int(body.get("max_tokens", 400) or 400),
+                             max_context_for(rec)))
+        extra = ({"priority": priority_for(rec)} if version == "v4" else None)
         try:
             resp = client.chat.completions.create(
                 model=model, messages=convo,
-                max_tokens=body.get("max_tokens", 400),
-                temperature=body.get("temperature", 0.3))
+                max_tokens=max_tok,
+                temperature=body.get("temperature", 0.3),
+                extra_body=extra)
             answer = resp.choices[0].message.content
         except Exception:
             raise HTTPException(

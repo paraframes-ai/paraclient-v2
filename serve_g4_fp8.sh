@@ -43,4 +43,5 @@ exec vllm serve google/gemma-4-12B-it \
                  ParaFrames/ParaClient-civics-v2.2=adaptersG4/civics \
                  ParaFrames/ParaClient-spreadsheet-v2.2=adaptersG4/spreadsheet \
   --max-model-len 16384 \
+  --scheduling-policy priority \
   --gpu-memory-utilization 0.80
