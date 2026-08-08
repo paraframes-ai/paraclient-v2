@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fastapi import HTTPException  # noqa: E402  (module-level: used by resolve_version)
 from content_filter import ContentFilter, Action, HeuristicBackend  # noqa: E402
 from moderation import ShieldGemmaBackend, CompositeBackend  # noqa: E402
+import accounts  # noqa: E402  (SQLite account store: age gate, signup, login)
 import generate_media as gm  # noqa: E402
 from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
                         repair_sketch, floorplan_issues)
@@ -123,9 +124,12 @@ def tier_of(rec: dict) -> str:
     return {"internal": "dev", "edu": "paid"}.get(rec.get("audience"), "free")
 
 
-def versions_for(rec: dict) -> list:
-    tier = tier_of(rec)
+def versions_for_tier(tier: str) -> list:
     return sorted(v for v, tiers in VERSION_ACCESS.items() if tier in tiers)
+
+
+def versions_for(rec: dict) -> list:
+    return versions_for_tier(tier_of(rec))
 
 
 def resolve_version(rec: dict, requested: str | None) -> str:
@@ -259,6 +263,14 @@ def build_app(tutor_url: str, tutor_key: str):
     keys = load_keys()
     rl = RateLimiter()
 
+    # Real account store (signup/login/age gate). The legacy JSON keystore above
+    # still backs the internal/service + demo keys; see lookup().
+    accounts.init_db()
+    print(f"[*] accounts db -> {accounts.DB_PATH} "
+          f"({accounts.count_accounts()} accounts) | new signups get tier "
+          f"'{accounts.default_tier()}' (PARACLIENT_ENV="
+          f"{os.environ.get('PARACLIENT_ENV', 'dev')})")
+
     print(f"[*] CAD routes (/v1/sketch, /v1/3d) -> LOCAL adapter {CAD_MODEL}")
     print("[*] docs/slides -> LOCAL agentic (paraclient + web search/fetch)")
 
@@ -349,11 +361,19 @@ def build_app(tutor_url: str, tutor_key: str):
         raise RuntimeError("no parseable spreadsheet from model")
 
     def lookup(authorization: str | None):
-        """Validate the bearer key only (no rate-limit consumption)."""
+        """Validate the bearer key only (no rate-limit consumption).
+
+        Two key sources, checked in this order:
+          1. accounts.db — real user accounts (signup/login). Keys are stored
+             hashed; a suspended account resolves to nothing.
+          2. gateway_keys.json — the legacy scaffold keystore, which still holds
+             the internal/service and demo keys. Kept so the e2 handshake and
+             existing tooling do not break; new users never land here.
+        """
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(401, "missing bearer key")
         tok = authorization.split(" ", 1)[1].strip()
-        rec = keys.get(tok)
+        rec = accounts.record_for_key(tok) or keys.get(tok)
         if not rec:
             raise HTTPException(401, "invalid key")
         return tok, rec
@@ -375,6 +395,109 @@ def build_app(tutor_url: str, tutor_key: str):
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
                 "tier": tier_of(rec), "allowed_versions": versions_for(rec)}
+
+    # ---------------- Accounts: age gate -> signup -> login ----------------
+    # The gate is a SEPARATE endpoint on purpose: compliance/01 §1 requires the
+    # age check to happen before any other data is collected, so the client must
+    # be able to ask it without having gathered an email or password yet.
+
+    def _acct_error(e: accounts.AccountError):
+        return JSONResponse({"error": e.message}, status_code=e.status)
+
+    @app.post("/v1/auth/age-gate")
+    async def auth_age_gate(request: Request):
+        """Neutral date-of-birth gate. Body: {"dob": "YYYY-MM-DD"}.
+
+        13+ -> {allowed: true, gate_token}. Under 13 -> {allowed: false} with
+        the school message, and NOTHING is stored (compliance/01 §2). The DOB
+        is used for one comparison and discarded; it is never persisted and is
+        deliberately never written to any log line."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(400, "expected a JSON body with 'dob'")
+        try:
+            return JSONResponse(accounts.age_gate(body.get("dob", "")))
+        except accounts.AccountError as e:
+            return _acct_error(e)
+
+    @app.post("/v1/auth/signup")
+    async def auth_signup(request: Request):
+        """Create a consumer account. Body: {email, password, gate_token}.
+
+        Requires a live gate token, so there is no path to an account that
+        skipped the age check. Returns the API key ONCE — it is stored hashed
+        and cannot be shown again."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(400, "expected a JSON body")
+        try:
+            out = accounts.create_account(
+                email=body.get("email", ""), password=body.get("password", ""),
+                gate_token=body.get("gate_token", ""))
+        except accounts.AccountError as e:
+            return _acct_error(e)
+        return JSONResponse({**out,
+                             "allowed_versions": versions_for_tier(out["tier"]),
+                             "note": "Save this api_key now — it cannot be "
+                                     "retrieved again."}, status_code=201)
+
+    @app.post("/v1/auth/login")
+    async def auth_login(request: Request):
+        """Email + password -> a fresh API key."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(400, "expected a JSON body")
+        try:
+            out = accounts.login(body.get("email", ""),
+                                 body.get("password", ""))
+        except accounts.AccountError as e:
+            return _acct_error(e)
+        return JSONResponse({**out,
+                             "allowed_versions": versions_for_tier(out["tier"])})
+
+    @app.post("/v1/auth/logout")
+    async def auth_logout(authorization: str | None = Header(None)):
+        """Revoke the presented key (other sessions keep working)."""
+        tok, _ = lookup(authorization)
+        return {"revoked": accounts.revoke_key(tok)}
+
+    @app.get("/v1/account/me")
+    async def account_me(authorization: str | None = Header(None)):
+        _, rec = lookup(authorization)
+        acct = accounts.get_account(rec.get("user")) or {}
+        return {"user": rec.get("user"), "email": acct.get("email"),
+                "audience": rec.get("audience"), "tier": tier_of(rec),
+                "status": acct.get("status", "active"),
+                "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
+                "allowed_versions": versions_for(rec)}
+
+    @app.post("/v1/account/suspend")
+    async def account_suspend(request: Request,
+                              authorization: str | None = Header(None)):
+        """Step 1 of the discovered-under-13 takedown (compliance/01 §4):
+        suspend immediately (revoking every live key) so access stops now, then
+        run /v1/account/delete for the data erasure. Internal callers only."""
+        _, rec = lookup(authorization)
+        if rec.get("audience") != "internal":
+            raise HTTPException(403, "internal/service callers only")
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        user = body.get("user")
+        if not user:
+            raise HTTPException(400, "pass {'user': '<id>'}")
+        status = body.get("status", "suspended")
+        try:
+            changed = accounts.set_status(user, status)
+        except accounts.AccountError as e:
+            return _acct_error(e)
+        if not changed:
+            raise HTTPException(404, f"no such account: {user}")
+        return {"user": user, "status": status}
 
     @app.post("/v1/account/delete")
     async def account_delete(request: Request,
@@ -409,6 +532,9 @@ def build_app(tutor_url: str, tutor_key: str):
             keys.pop(k, None)
             rl._hits.pop(k, None)
         save_keys(keys)
+        # Real accounts live in accounts.db; erase the row and every key there
+        # too, or the "deletion" would only clear the legacy scaffold keystore.
+        db_keys_removed = accounts.delete_account(user)
 
         # Best-effort: tell e2 to purge this user's Knowledge Library + record.
         kl_status = "e2_purge_not_configured"
@@ -421,10 +547,11 @@ def build_app(tutor_url: str, tutor_key: str):
             except Exception as e:  # noqa: BLE001
                 kl_status = f"e2_purge_failed: {e}"
 
-        erasure_audit(user, len(removed), requested_by=rec.get("user"),
+        total_removed = len(removed) + db_keys_removed
+        erasure_audit(user, total_removed, requested_by=rec.get("user"),
                       kl_status=kl_status)
         return JSONResponse({
-            "deleted": True, "user": user, "keys_removed": len(removed),
+            "deleted": True, "user": user, "keys_removed": total_removed,
             "knowledge_library_purge": kl_status,
             "note": ("L4 revoked access and cleared local state. The Knowledge "
                      "Library embeddings and account record live on e2 and must "

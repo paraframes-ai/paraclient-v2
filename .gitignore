@@ -7,6 +7,11 @@ logs/
 # gateway per-user keystore (secrets)
 gateway_keys.json
 
+# account store — password hashes, key hashes, real user data. Never commit.
+accounts.db
+accounts.db-wal
+accounts.db-shm
+
 # virtualenvs
 venv/
 venv-gen/
