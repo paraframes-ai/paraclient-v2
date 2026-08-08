@@ -43,6 +43,8 @@ def main():
     ap.add_argument("--save-steps", type=int, default=0,
                     help="if >0, checkpoint every N steps instead of every epoch "
                          "(use for long jobs on a preemptable partition)")
+    ap.add_argument("--max-steps", type=int, default=0,
+                    help="if >0, stop after N steps (quick pipeline validation)")
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -119,6 +121,8 @@ def main():
     )
     if args.save_steps:
         cfg_kwargs["save_steps"] = args.save_steps
+    if args.max_steps:
+        cfg_kwargs["max_steps"] = args.max_steps
     # trl 0.11.x names this max_seq_length; newer trl renamed it to max_length.
     _sft_params = inspect.signature(SFTConfig.__init__).parameters
     cfg_kwargs["max_length" if "max_length" in _sft_params else "max_seq_length"] = \
