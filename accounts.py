@@ -41,11 +41,13 @@ THE AGE GATE IS THE HINGE (compliance/01 §1-§2)
   self-serve signup. `test_accounts.py` asserts this as an invariant.
 
 TIERS (interim, pre-billing)
-  There is no billing integration yet, so tier is decided by DEPLOYMENT
-  ENVIRONMENT rather than by a plan the user bought:
+  Plans are free -> plus -> premiere, plus an internal dev tier; the gateway
+  owns the per-tier model access and Knowledge Library quotas. There is no
+  billing integration yet, so tier is decided by DEPLOYMENT ENVIRONMENT rather
+  than by a plan the user bought:
       PARACLIENT_ENV=dev  (default) -> new accounts get tier "dev"
-      PARACLIENT_ENV=prod           -> new accounts get tier "paid"
-  This keeps production users on full access while payments do not exist, and
+      PARACLIENT_ENV=prod           -> new accounts get tier "plus"
+  This keeps production users on a paid tier while payments do not exist, and
   keeps dev boxes clearly labelled. When billing lands, `default_tier()` is the
   single function that changes: real accounts start "free" and are promoted on
   successful payment.
@@ -149,13 +151,16 @@ def init_db() -> None:
 # --------------------------------------------------------------------------
 
 def default_tier() -> str:
-    """Interim tier policy: dev boxes mint dev accounts, production mints paid.
+    """Interim tier policy: dev boxes mint dev accounts, production mints plus.
 
-    Pre-billing there is no way to *buy* anything, so production users get full
-    access rather than being gated behind a plan that cannot be purchased. This
-    is the one function to change when payments land."""
+    Pre-billing there is no way to *buy* anything, so production users get a
+    paid tier rather than being gated behind a plan that cannot be purchased.
+    Plus (not Premiere) is the entry paid tier, so it is the conservative
+    default to hand out for free. This is the one function to change when
+    payments land: new accounts become "free" and are promoted to plus/premiere
+    on a successful charge."""
     env = os.environ.get("PARACLIENT_ENV", "dev").strip().lower()
-    return "paid" if env in ("prod", "production") else "dev"
+    return "plus" if env in ("prod", "production") else "dev"
 
 
 def _hash_password(password: str, salt: bytes | None = None):

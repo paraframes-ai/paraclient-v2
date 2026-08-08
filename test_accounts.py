@@ -78,7 +78,7 @@ check("api key returned once", acct["api_key"].startswith("pk-"))
 # The user's requirement: dev env -> dev tier, prod env -> paid tier.
 check("dev env mints tier 'dev'", acct["tier"] == "dev", acct["tier"])
 os.environ["PARACLIENT_ENV"] = "prod"
-check("prod env mints tier 'paid'", accounts.default_tier() == "paid")
+check("prod env mints a paid tier", accounts.default_tier() == "plus")
 os.environ["PARACLIENT_ENV"] = "dev"
 
 print("\n=== gate token cannot be bypassed or reused ===")
@@ -171,6 +171,45 @@ n = accounts.delete_account(acct["user"])
 check("delete removes the account", accounts.get_account(acct["user"]) is None)
 check("delete removes its keys", accounts.record_for_key(acct["api_key"]) is None)
 check("delete reports keys removed", isinstance(n, int) and n >= 0)
+
+print("\n=== tiers: model access, storage quotas, rate limiting ===")
+import auth_gateway as gw  # noqa: E402
+
+check("tiers are free/plus/premiere/dev",
+      gw.TIERS == ("free", "plus", "premiere", "dev"), str(gw.TIERS))
+
+# Storage allowances exactly as specified.
+GB, TB = 1000 ** 3, 1000 ** 4
+for tier, want, label in [("free", 128 * GB, "128 GB"), ("plus", 1 * TB, "1 TB"),
+                          ("premiere", 2 * TB, "2 TB"), ("dev", 4 * TB, "4 TB")]:
+    got = gw.storage_bytes_for({"tier": tier})
+    check(f"{tier} library storage = {label}", got == want,
+          f"got {gw.human_bytes(got)}")
+
+# Rate limiting: dev only.
+for tier in ("free", "plus", "premiere", "paid"):
+    check(f"{tier} is NOT rate limited", tier not in gw.RATE_LIMITED_TIERS)
+check("dev IS rate limited", "dev" in gw.RATE_LIMITED_TIERS)
+
+# Model access: free is CPU-only; every paid tier reaches v4 (GPU).
+check("free cannot use v4", "v4" not in gw.versions_for_tier("free"))
+for tier in ("plus", "premiere", "dev"):
+    check(f"{tier} can use v4", "v4" in gw.versions_for_tier(tier))
+check("free defaults to v2", gw.DEFAULT_VERSION_BY_TIER["free"] == "v2")
+
+# Back-compat: keys already issued as "paid" keep Plus-level access.
+check("legacy 'paid' keeps v4 access", "v4" in gw.versions_for_tier("paid"))
+check("legacy 'paid' maps to the Plus quota",
+      gw.storage_bytes_for({"tier": "paid"}) == 1 * TB)
+check("legacy 'paid' displays as Plus", gw.TIER_LABEL["paid"] == "Plus")
+check("edu audience still resolves to a paid tier",
+      gw.tier_of({"audience": "edu"}) in gw.PAID_TIERS)
+check("unknown tier falls back to free",
+      gw.storage_bytes_for({"tier": "bogus"}) == 128 * GB)
+
+os.environ["PARACLIENT_ENV"] = "prod"
+check("prod signups get the Plus tier", accounts.default_tier() == "plus")
+os.environ["PARACLIENT_ENV"] = "dev"
 
 print(f"\n{'='*54}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

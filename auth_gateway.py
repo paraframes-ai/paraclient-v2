@@ -103,25 +103,62 @@ def model_for(mode: str, subject: str) -> str:
 # multimodal); v2 (7B) and v3 (14B) are served on CPU (llama.cpp) for the free
 # tier. v4 is premium -> paid/dev only. edu (schools) is treated as a PAID tier.
 # --------------------------------------------------------------------------
+# Plans: free -> plus -> premiere, plus an internal dev tier. "paid" is the
+# ORIGINAL name of the single paid tier and is kept as a working alias for plus
+# so existing keys (gateway_keys.json, and the edu->paid derivation below) keep
+# their access; nothing has to be re-issued.
+TIERS = ("free", "plus", "premiere", "dev")
+TIER_LABEL = {"free": "Free", "plus": "Plus", "premiere": "Premiere",
+              "dev": "Dev", "paid": "Plus"}
+# Every tier above free may reach the GPU + third-party models.
+PAID_TIERS = {"plus", "premiere", "dev", "paid"}
+
 VERSION_ACCESS = {
-    "v2": {"free", "paid", "dev"},
-    "v3": {"free", "paid", "dev"},
-    "v4": {"paid", "dev"},          # premium: GPU + multimodal, paid/dev/edu
+    "v2": {"free"} | PAID_TIERS,
+    "v3": {"free"} | PAID_TIERS,
+    "v4": set(PAID_TIERS),          # premium: GPU + multimodal (not free)
 }
 PREFERRED_VERSION_ORDER = ("v4", "v3", "v2")   # best first, for defaulting
-# Per-tier default: paid/dev get v4 (GPU); free defaults to v2 (7B, responsive
+# Per-tier default: paid tiers get v4 (GPU); free defaults to v2 (7B, responsive
 # on CPU) rather than v3 (14B, ~2-4 tok/s) — v3 is opt-in for free users.
-DEFAULT_VERSION_BY_TIER = {"free": "v2", "paid": "v4", "dev": "v4"}
+DEFAULT_VERSION_BY_TIER = {"free": "v2", "plus": "v4", "premiere": "v4",
+                           "paid": "v4", "dev": "v4"}
 VERSION_MODEL = {"v2": "paraclient-v2", "v3": "paraclient-v3"}  # CPU llama.cpp names
+
+# Knowledge Library (per-user RAG) storage allowance per tier. Decimal units,
+# the way storage is quoted to users: 1 TB = 1000 GB, not 1024 GiB.
+_GB = 1000 ** 3
+_TB = 1000 ** 4
+TIER_STORAGE_BYTES = {
+    "free":     128 * _GB,
+    "plus":       1 * _TB,
+    "premiere":   2 * _TB,
+    "dev":        4 * _TB,
+    "paid":       1 * _TB,          # legacy alias of plus
+}
+
+# Rate limiting is applied to DEV KEYS ONLY (see auth()). Real user tiers are
+# unlimited for now.
+RATE_LIMITED_TIERS = {"dev"}
 
 
 def tier_of(rec: dict) -> str:
     """A key's tier. Explicit `tier` wins; else derive: internal->dev,
     edu->paid (schools pay), everything else->free."""
     t = rec.get("tier")
-    if t in ("free", "paid", "dev"):
+    if t in TIERS or t == "paid":
         return t
     return {"internal": "dev", "edu": "paid"}.get(rec.get("audience"), "free")
+
+
+def storage_bytes_for(rec: dict) -> int:
+    """Knowledge Library allowance for this key, in bytes."""
+    return TIER_STORAGE_BYTES.get(tier_of(rec), TIER_STORAGE_BYTES["free"])
+
+
+def human_bytes(n: int) -> str:
+    """Render a quota the way it is sold ('128 GB', '2 TB')."""
+    return f"{n // _TB} TB" if n >= _TB else f"{n // _GB} GB"
 
 
 def versions_for_tier(tier: str) -> list:
@@ -379,10 +416,21 @@ def build_app(tutor_url: str, tutor_key: str):
         return tok, rec
 
     def auth(authorization: str | None):
-        """Validate + rate-limit (for the model/generation routes)."""
+        """Validate + rate-limit (for the model/generation routes).
+
+        Rate limiting applies to DEV KEYS ONLY (RATE_LIMITED_TIERS). Real user
+        tiers are deliberately unlimited for now; the cap is kept on dev keys so
+        a runaway test loop can't saturate the GPU during development.
+
+        NOTE this leaves user traffic uncapped on a single-GPU box: one account
+        can occupy the v4 queue for everyone, and signup is self-serve. Re-arm
+        by adding tiers to RATE_LIMITED_TIERS (one-line change) when abuse
+        controls matter more than headroom.
+        """
         tok, rec = lookup(authorization)
-        if not rl.allow(tok, rec.get("rpm", 30), time.time()):
-            raise HTTPException(429, "rate limit exceeded")
+        if tier_of(rec) in RATE_LIMITED_TIERS:
+            if not rl.allow(tok, rec.get("rpm", 120), time.time()):
+                raise HTTPException(429, "rate limit exceeded")
         return rec
 
     @app.post("/v1/auth/validate")
@@ -394,7 +442,12 @@ def build_app(tutor_url: str, tutor_key: str):
         _, rec = lookup(authorization)
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
-                "tier": tier_of(rec), "allowed_versions": versions_for(rec)}
+                "tier": tier_of(rec), "allowed_versions": versions_for(rec),
+                "plan": TIER_LABEL.get(tier_of(rec), "Free"),
+                # e2 owns the Knowledge Library files, so it enforces the quota;
+                # the gateway is the single source of truth for what it IS.
+                "library_storage_bytes": storage_bytes_for(rec),
+                "library_storage": human_bytes(storage_bytes_for(rec))}
 
     # ---------------- Accounts: age gate -> signup -> login ----------------
     # The gate is a SEPARATE endpoint on purpose: compliance/01 §1 requires the
@@ -470,9 +523,13 @@ def build_app(tutor_url: str, tutor_key: str):
         acct = accounts.get_account(rec.get("user")) or {}
         return {"user": rec.get("user"), "email": acct.get("email"),
                 "audience": rec.get("audience"), "tier": tier_of(rec),
+                "plan": TIER_LABEL.get(tier_of(rec), "Free"),
                 "status": acct.get("status", "active"),
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
-                "allowed_versions": versions_for(rec)}
+                "allowed_versions": versions_for(rec),
+                "library_storage_bytes": storage_bytes_for(rec),
+                "library_storage": human_bytes(storage_bytes_for(rec)),
+                "rate_limited": tier_of(rec) in RATE_LIMITED_TIERS}
 
     @app.post("/v1/account/suspend")
     async def account_suspend(request: Request,
@@ -871,7 +928,7 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(
                 403, "the Gemini route is not available to the 'edu' audience "
                      "(student data must stay on-prem; use the local tutor)")
-        if tier_of(rec) not in ("paid", "dev"):
+        if tier_of(rec) not in PAID_TIERS:
             raise HTTPException(
                 402, "external models (Gemini) require a paid plan "
                      f"(your tier: {tier_of(rec)})")
@@ -919,7 +976,7 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(
                 403, "Claude routes are not available to the 'edu' audience "
                      "(student data must stay on-prem; use the local tutor)")
-        if tier_of(rec) not in ("paid", "dev"):
+        if tier_of(rec) not in PAID_TIERS:
             raise HTTPException(
                 402, "external Claude models require a paid plan "
                      f"(your tier: {tier_of(rec)})")
