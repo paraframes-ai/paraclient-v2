@@ -15,6 +15,8 @@ venv-gen/
 llama.cpp/
 models/
 adapters/
+adapters14b/
+adaptersG4/
 data/
 out/
 
@@ -27,5 +29,12 @@ serve_vllm_active.sh
 *.7b-backup
 venv-g4/
 serve_vllm_active.sh.qwen-rollback
+serve_vllm_active.sh.bnb-rollback
+
+# wrangler (Cloudflare Pages) local cache
+.wrangler/
+
+# generated preview twin of the research page (regenerate from site/index.html)
+site/research.artifact.html
 llama.cpp/build-cuda/
 models/shieldgemma-2b-gguf/
