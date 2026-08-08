@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ParaClient — Research &amp; Method · ParaFrames</title>
+<meta name="description" content="How we built ParaClient: an on-prem, correct-by-construction AI tutor. Research notes on adapters, deterministic output gates, data provenance, live-source civics, and local safety.">
+<script>
+  /* apply saved theme before paint to avoid a flash */
+  (function(){var r=document.documentElement;r.classList.add("js");try{var t=localStorage.getItem("pf-theme");if(t)r.setAttribute("data-theme",t);}catch(e){}})();
+</script>
+<style>
+  /* ---- Tokens: minimal academic. Light is the base; dark redefines vars. ---- */
+  :root{
+    --bg:#FFFFFF; --bg-2:#FAFAF8; --bg-3:#F3F3F0;
+    --ink:#1A1A1C; --muted:#565961; --faint:#898C94;
+    --line:#E7E6E2; --line-strong:#D6D5D0;
+    --accent:#A85B00; --accent-ink:#864900; --accent-soft:rgba(245,166,35,.16);
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;
+    --measure:70ch; --page:760px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#0D0E10; --bg-2:#141518; --bg-3:#1A1C20;
+      --ink:#E8E9EB; --muted:#9EA1A9; --faint:#6C6F78;
+      --line:#232529; --line-strong:#31343A;
+      --accent:#F5A623; --accent-ink:#F9C55E; --accent-soft:rgba(245,166,35,.20);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0D0E10; --bg-2:#141518; --bg-3:#1A1C20;
+    --ink:#E8E9EB; --muted:#9EA1A9; --faint:#6C6F78;
+    --line:#232529; --line-strong:#31343A;
+    --accent:#F5A623; --accent-ink:#F9C55E; --accent-soft:rgba(245,166,35,.20);
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%; scroll-behavior:smooth}
+  @media (prefers-reduced-motion:reduce){ html{scroll-behavior:auto} }
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:18px; line-height:1.72;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  .page{max-width:var(--page); margin:0 auto; padding:0 28px}
+
+  a{color:var(--accent); text-decoration:none}
+  a:hover{color:var(--accent-ink); text-decoration:underline; text-underline-offset:2px}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:2px}
+
+  h1,h2,h3{margin:0; line-height:1.2; text-wrap:balance; font-weight:600}
+  h1{font-size:clamp(2.15rem,5.2vw,3.1rem); font-weight:650; letter-spacing:-.021em; line-height:1.08}
+  h2{font-size:clamp(1.4rem,3vw,1.75rem); letter-spacing:-.015em}
+  h3{font-size:1.08rem; letter-spacing:-.01em}
+  p{margin:0 0 1.05em}
+  .measure{max-width:var(--measure)}
+  .muted{color:var(--muted)}
+  .mono{font-family:var(--mono)}
+
+  /* ---- top bar ---- */
+  header.top{position:sticky; top:0; z-index:20; background:color-mix(in srgb,var(--bg) 86%,transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--line)}
+  header.top .row{max-width:var(--page); margin:0 auto; padding:15px 28px; display:flex; align-items:center; justify-content:space-between; gap:16px}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:600; letter-spacing:-.01em; font-size:.98rem}
+  .brand .glyph{width:20px; height:20px; flex:0 0 auto}
+  .brand small{font-family:var(--mono); font-weight:500; font-size:.66rem; letter-spacing:.16em; text-transform:uppercase; color:var(--faint)}
+  .navwrap{display:flex; align-items:center; gap:22px}
+  .top nav{display:flex; gap:20px; font-size:.82rem}
+  .top nav a{color:var(--muted); display:flex; gap:6px; align-items:baseline}
+  .top nav a .n{font-family:var(--mono); font-size:.68rem; color:var(--faint)}
+  .top nav a:hover{color:var(--ink); text-decoration:none}
+  @media (max-width:720px){ .top nav{display:none} }
+  .toggle{appearance:none; background:transparent; border:1px solid var(--line-strong); color:var(--muted); width:34px; height:34px; border-radius:8px; cursor:pointer; display:grid; place-items:center; padding:0}
+  .toggle:hover{color:var(--ink); border-color:var(--faint)}
+  .toggle svg{width:17px; height:17px}
+  .toggle .sun{display:none} .toggle .moon{display:block}
+  :root[data-theme="dark"] .toggle .sun{display:block} :root[data-theme="dark"] .toggle .moon{display:none}
+  @media (prefers-color-scheme:dark){ :root:not([data-theme="light"]) .toggle .sun{display:block} :root:not([data-theme="light"]) .toggle .moon{display:none} }
+
+  /* ---- hero ---- */
+  .hero{padding:84px 0 44px}
+  .kicker{font-family:var(--mono); font-size:.72rem; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); margin:0 0 1.4rem}
+  .hero h1{margin-bottom:.55em}
+  .hero .deck{font-size:1.22rem; color:var(--muted); max-width:46ch; line-height:1.55}
+
+  .facts{margin-top:46px; display:grid; grid-template-columns:repeat(4,1fr); gap:0; border-top:1px solid var(--line)}
+  .facts .f{padding:18px 18px 18px 0; border-right:1px solid var(--line)}
+  .facts .f:last-child{border-right:none}
+  .facts .k{font-family:var(--mono); font-size:.64rem; letter-spacing:.13em; text-transform:uppercase; color:var(--faint)}
+  .facts .v{font-size:1.12rem; font-weight:600; margin-top:7px; letter-spacing:-.01em}
+  .facts .v small{font-weight:500; color:var(--muted); font-size:.82rem}
+  @media (max-width:680px){ .facts{grid-template-columns:1fr 1fr} .facts .f:nth-child(2){border-right:none} .facts .f{border-bottom:1px solid var(--line); padding-right:18px} }
+
+  /* ---- sections ---- */
+  section{padding:56px 0; border-top:1px solid var(--line)}
+  .sec-num{font-family:var(--mono); font-size:.72rem; letter-spacing:.12em; color:var(--faint); display:flex; align-items:center; gap:12px; margin-bottom:18px}
+  .sec-num .bar{height:1px; width:34px; background:var(--line-strong)}
+  .sec-head{margin-bottom:32px}
+  .sec-head .lead{font-size:1.12rem; color:var(--muted); margin:.7em 0 0; max-width:var(--measure)}
+
+  /* ---- thesis ---- */
+  .thesis{font-size:1.4rem; line-height:1.42; letter-spacing:-.015em; font-weight:450; max-width:24em; color:var(--ink)}
+  .thesis em{font-style:italic; color:var(--muted)}
+  .thesis strong{font-weight:650; color:var(--accent-ink)}
+  :root[data-theme="dark"] .thesis strong{color:var(--accent)}
+
+  /* ---- research list (numbered, single column, hairline-separated) ---- */
+  .decisions{border-top:1px solid var(--line); margin-top:8px}
+  .decision{display:grid; grid-template-columns:44px 1fr; gap:8px 20px; padding:26px 0; border-bottom:1px solid var(--line)}
+  .decision .idx{font-family:var(--mono); font-size:.82rem; color:var(--accent); padding-top:3px}
+  .decision .tag{font-family:var(--mono); font-size:.64rem; letter-spacing:.13em; text-transform:uppercase; color:var(--faint); margin-bottom:6px}
+  .decision h3{margin-bottom:.4em}
+  .decision p{color:var(--muted); font-size:1rem; margin:0 0 .7em}
+  .decision .detail{font-family:var(--mono); font-size:.82rem; color:var(--faint); line-height:1.6; margin-top:10px}
+  .decision .detail b{color:var(--muted); font-weight:600}
+  @media (max-width:560px){ .decision{grid-template-columns:1fr; gap:4px} .decision .idx{padding-top:0} }
+
+  /* ---- figure / diagram ---- */
+  figure.figure{margin:8px 0 0; padding:26px 22px; border:1px solid var(--line); border-radius:10px; background:var(--bg-2); overflow-x:auto}
+  figure.figure figcaption{font-size:.9rem; color:var(--muted); margin-top:18px; max-width:var(--measure)}
+  svg .lbl{font-family:var(--mono); font-size:12px; fill:var(--ink)}
+  svg .lbl-s{font-family:var(--mono); font-size:10.5px; fill:var(--faint)}
+  svg .box{fill:var(--bg-3); stroke:var(--line-strong)}
+  svg .box-p{fill:var(--accent-soft); stroke:var(--accent)}
+  svg .flow{stroke:var(--faint); fill:none}
+  svg .flow-b{stroke:var(--accent); fill:none; stroke-dasharray:5 4}
+
+  .subgrid{display:grid; grid-template-columns:1fr 1fr; gap:28px; margin-top:30px}
+  @media (max-width:640px){ .subgrid{grid-template-columns:1fr; gap:20px} }
+  .subgrid h3{margin-bottom:.4em}
+  .subgrid p{color:var(--muted); font-size:1rem; margin:0}
+
+  /* ---- table ---- */
+  .tablewrap{overflow-x:auto; margin-top:6px}
+  table{border-collapse:collapse; width:100%; font-size:.95rem}
+  caption{caption-side:top; text-align:left; font-family:var(--mono); font-size:.68rem; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); padding:0 0 12px}
+  th,td{padding:13px 16px 13px 0; text-align:left; border-bottom:1px solid var(--line); vertical-align:top}
+  thead th{font-family:var(--mono); font-size:.66rem; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); font-weight:600}
+  tbody tr:last-child td{border-bottom:none}
+  td.mono{font-family:var(--mono)}
+  .badge{display:inline-block; font-family:var(--mono); font-size:.66rem; padding:2px 8px; border-radius:999px; letter-spacing:.04em; border:1px solid var(--line-strong); color:var(--muted)}
+  .badge.q{color:var(--accent); border-color:var(--accent)}
+
+  /* ---- quant ---- */
+  .quant{display:grid; grid-template-columns:1fr 1fr; gap:36px; align-items:center; margin-top:6px}
+  @media (max-width:680px){ .quant{grid-template-columns:1fr; gap:24px} }
+  .quant h3{margin-bottom:.5em}
+  .quant p{color:var(--muted); font-size:1rem}
+  ul.arrows{list-style:none; padding:0; margin:14px 0 0; display:flex; flex-direction:column; gap:9px; font-size:.95rem; color:var(--muted)}
+  ul.arrows li{padding-left:24px; position:relative}
+  ul.arrows li::before{content:"→"; position:absolute; left:0; color:var(--accent); font-family:var(--mono)}
+  ul.arrows b{color:var(--ink)}
+  .bars{display:flex; flex-direction:column; gap:20px}
+  .bar .bl{display:flex; justify-content:space-between; font-family:var(--mono); font-size:.72rem; color:var(--muted); margin-bottom:8px}
+  .track{height:10px; background:var(--bg-3); border-radius:6px; overflow:hidden; position:relative; border:1px solid var(--line)}
+  .track + .track{margin-top:7px}
+  .fill{height:100%}
+  .fill.old{background:var(--faint)}
+  .fill.new{background:var(--accent)}
+  .barcap{font-family:var(--mono); font-size:.72rem; color:var(--muted); margin-top:5px; display:flex; justify-content:space-between}
+  .barcap .hi{color:var(--ink); font-weight:600}
+
+  .principles{display:grid; grid-template-columns:1fr 1fr; gap:28px; margin-top:28px}
+  @media (max-width:640px){ .principles{grid-template-columns:1fr; gap:20px} }
+  .principles .p-num{font-family:var(--mono); font-size:.66rem; letter-spacing:.13em; text-transform:uppercase; color:var(--faint)}
+  .principles h3{margin:.4em 0 .3em}
+  .principles p{color:var(--muted); font-size:1rem; margin:0}
+
+  code{font-family:var(--mono); font-size:.86em; background:var(--bg-3); padding:1px 6px; border-radius:5px}
+
+  /* ---- footer ---- */
+  footer{border-top:1px solid var(--line); padding:48px 0 72px}
+  footer .brand{margin-bottom:16px}
+  footer .note{font-family:var(--mono); font-size:.78rem; color:var(--faint); line-height:1.75; max-width:60ch}
+  footer .disc{margin-top:24px; padding-top:20px; border-top:1px solid var(--line); font-size:.84rem; color:var(--faint); max-width:var(--measure)}
+
+  /* ---- interactivity & amber presence ---- */
+  .sec-num .bar{background:var(--accent); opacity:.55}
+  .thesis{border-left:3px solid var(--accent); padding-left:22px}
+  tbody tr{transition:background .15s ease}
+  tbody tr:hover{background:var(--accent-soft)}
+  .decision{transition:border-color .2s ease}
+  .decision:hover{border-bottom-color:var(--accent)}
+  .top nav a{transition:color .15s ease}
+  .top nav a.active{color:var(--ink)}
+  .top nav a.active .n{color:var(--accent)}
+
+  /* reveal on scroll (only when JS is on, so no-JS shows everything) */
+  .js .reveal{opacity:0; transform:translateY(16px); transition:opacity .7s ease, transform .7s ease}
+  .js .reveal.in{opacity:1; transform:none}
+  @media (prefers-reduced-motion:reduce){ .js .reveal{opacity:1; transform:none; transition:none} }
+
+  /* animated bars */
+  .fill{transition:width 1.15s cubic-bezier(.2,.7,.2,1)}
+
+  /* interactive diagram */
+  svg .stage rect{transition:stroke .2s ease, stroke-width .2s ease}
+  svg .stage:hover rect{stroke:var(--accent); stroke-width:2}
+  svg .stage.lit rect{stroke:var(--accent); stroke-width:2.6}
+  #dot{fill:var(--accent)}
+  .runrow{display:flex; align-items:center; gap:14px; margin-top:18px; flex-wrap:wrap}
+  .runbtn{display:none; align-items:center; gap:8px; font-family:var(--mono); font-size:.8rem; color:#17140C; background:var(--accent); border:none; padding:9px 15px; border-radius:8px; cursor:pointer; transition:background .15s ease}
+  .js .runbtn{display:inline-flex}
+  .runbtn:hover{background:var(--accent-ink)}
+  .runbtn:disabled{opacity:.5; cursor:default}
+  .runstatus{font-family:var(--mono); font-size:.78rem; color:var(--muted)}
+
+  /* hoverable timeline chart */
+  figure.chart{overflow:visible}
+  .chartwrap{position:relative}
+  svg#tl{width:100%; height:auto; display:block; overflow:visible; touch-action:pan-y}
+  svg#tl .grid{stroke:var(--line); stroke-width:1}
+  svg#tl .axl{font-family:var(--mono); font-size:10px; fill:var(--faint)}
+  svg#tl .ln{fill:none; stroke:var(--accent); stroke-width:2; stroke-linejoin:round; stroke-linecap:round}
+  svg#tl .ar{fill:var(--accent-soft); stroke:none}
+  svg#tl .pt{fill:var(--bg-2); stroke:var(--accent); stroke-width:2; transition:r .12s ease}
+  svg#tl .hit{fill:transparent}
+  @media (hover:hover){ svg#tl .hit{cursor:pointer} }
+  .tip{position:absolute; left:0; top:0; pointer-events:none; opacity:0; transform:translate(-50%,calc(-100% - 12px)); background:var(--bg); border:1px solid var(--line-strong); border-radius:10px; padding:11px 13px; width:min(270px,74vw); box-shadow:0 12px 32px -16px rgba(0,0,0,.5); transition:opacity .12s ease; z-index:6}
+  .tip.on{opacity:1}
+  .tip.below{transform:translate(-50%,12px)}
+  .tip .d{font-family:var(--mono); font-size:.64rem; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); margin-bottom:5px}
+  .tip .t{font-weight:600; font-size:.94rem; margin-bottom:5px; line-height:1.3}
+  .tip .x{color:var(--muted); font-size:.85rem; line-height:1.5}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="row">
+    <div class="brand">
+      <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="var(--ink)" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M12 2.5 L20.23 7.25 L20.23 16.75 L12 21.5 L3.77 16.75 L3.77 7.25 Z"/>
+        <path d="M12 2.5 L12 21.5 M20.23 7.25 L3.77 16.75 M3.77 7.25 L20.23 16.75"/>
+      </svg>
+      ParaFrames <small>Research</small>
+    </div>
+    <div class="navwrap">
+      <nav>
+        <a href="#thesis"><span class="n">01</span> Approach</a>
+        <a href="#method"><span class="n">02</span> Method</a>
+        <a href="#gates"><span class="n">03</span> Correctness</a>
+        <a href="#serving"><span class="n">04</span> Serving</a>
+        <a href="#safety"><span class="n">05</span> Safety</a>
+        <a href="#timeline"><span class="n">06</span> Timeline</a>
+      </nav>
+      <button class="toggle" id="themeBtn" aria-label="Toggle light/dark theme" title="Toggle theme">
+        <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<div class="page">
+
+  <!-- HERO -->
+  <div class="hero">
+    <p class="kicker">Research notes · ParaClient</p>
+    <h1>A tutor that withholds the answer — and can prove its work.</h1>
+    <p class="deck">ParaClient is an on-prem AI tutor and maker's assistant for K-12. These notes cover the research decisions behind it: how it teaches, how it stays correct, and why a child's words never leave the box.</p>
+
+    <div class="facts">
+      <div class="f"><div class="k">Base models</div><div class="v">Qwen + Gemma</div></div>
+      <div class="f"><div class="k">Per subject</div><div class="v">1 LoRA <small>adapter</small></div></div>
+      <div class="f"><div class="k">Runs on</div><div class="v">1× L4 <small>24 GB</small></div></div>
+      <div class="f"><div class="k">Data leaves box</div><div class="v">Never</div></div>
+    </div>
+  </div>
+
+  <!-- 01 APPROACH -->
+  <section id="thesis" class="reveal">
+    <div class="sec-num"><span>01</span><span class="bar"></span><span>Approach</span></div>
+    <div class="sec-head"><h2>One idea runs through the whole system</h2></div>
+    <p class="thesis">A language model is a brilliant <em>proposer</em> and an unreliable <em>authority</em>. So across ParaClient, <strong>the model proposes and a deterministic system decides</strong> — a grammar constrains what it can say, a checker verifies what it said, and only verified output reaches a student. Where facts change with time, we don't ask the model to remember; we send it to look.</p>
+    <p class="muted measure" style="margin-top:1.4em">That principle appears as pedagogy (a tutor trained to <em>not</em> just answer), as engineering (circuits and floor plans validated before they render), as sourcing (civics answered from <code>.gov</code>, with a citation), and as safety (a local classifier that fails closed). The rest of these notes is how each one works.</p>
+  </section>
+
+  <!-- 02 METHOD -->
+  <section id="method" class="reveal">
+    <div class="sec-num"><span>02</span><span class="bar"></span><span>Method</span></div>
+    <div class="sec-head">
+      <h2>Six research decisions</h2>
+      <p class="lead">Each solved a specific failure mode of &ldquo;just prompt a big model.&rdquo;</p>
+    </div>
+
+    <div class="decisions">
+      <div class="decision">
+        <div class="idx">01</div>
+        <div>
+          <div class="tag">Pedagogy</div>
+          <h3>Two teaching modes, learned from data</h3>
+          <p>A tutor that hands over the answer isn't teaching. Every subject adapter learns two behaviors and switches between them by system prompt at inference.</p>
+          <div class="detail"><b>socratic</b> — withholds the answer, guides with questions.<br><b>graduated_hint</b> — guides first, then escalates to hints and worked steps so a stuck student can still finish.</div>
+        </div>
+      </div>
+
+      <div class="decision">
+        <div class="idx">02</div>
+        <div>
+          <div class="tag">Architecture</div>
+          <h3>One base, one adapter per subject</h3>
+          <p>Instead of many full models, we train a small LoRA adapter per subject on a shared base — tens of megabytes each, hot-swappable, and cheap to serve together.</p>
+          <div class="detail">QLoRA, 4-bit NF4 base + bf16 compute · rank 16 / α 32 · 7 target modules · fits a single 24 GB L4. Adapters trained here load identically on an A100.</div>
+        </div>
+      </div>
+
+      <div class="decision">
+        <div class="idx">03</div>
+        <div>
+          <div class="tag">Correctness</div>
+          <h3>Correct-by-construction output</h3>
+          <p>For circuits, CAD, and spreadsheets the model emits a structured artifact that a deterministic engine checks before anything renders. Invalid drafts are repaired or resampled — never shown.</p>
+          <div class="detail"><b>Circuits</b>: grammar-constrained JSON → electrical-rules check → keep first valid sample.<br><b>CAD</b>: geometric gate + auto-repair for valid floor plans.<br><b>Sheets</b>: formula gate on generate <i>and</i> tutor.</div>
+        </div>
+      </div>
+
+      <div class="decision">
+        <div class="idx">04</div>
+        <div>
+          <div class="tag">Provenance</div>
+          <h3>Data you can defend commercially</h3>
+          <p>Training dialogues are only as clean as their source and their generator. We built an LLM-propose / human-review pipeline and gated every dataset on license.</p>
+          <div class="detail"><b>In</b>: GSM8K-socratic (MIT, human-written). <b>Out</b>: Eedi dialogues (non-commercial). Civics: <b>every row</b> human-reviewed before it can train.</div>
+        </div>
+      </div>
+
+      <div class="decision">
+        <div class="idx">05</div>
+        <div>
+          <div class="tag">Freshness</div>
+          <h3>Time-varying facts are looked up, not recalled</h3>
+          <p>&ldquo;Who represents my district now?&rdquo; must never come from model memory — it goes stale. A constrained agent fetches the fact fresh and must cite an official source.</p>
+          <div class="detail">ReAct search/fetch restricted to <code>.gov</code> / <code>.mil</code> · answer marked <b>verified</b> only when the citation is on an official domain.</div>
+        </div>
+      </div>
+
+      <div class="decision">
+        <div class="idx">06</div>
+        <div>
+          <div class="tag">Safety · Privacy</div>
+          <h3>Moderation that runs on the box</h3>
+          <p>A cloud moderation API would mean shipping a child's text off-site. We can't. So safety is a local classifier screening both the student's input and the tutor's output.</p>
+          <div class="detail">ShieldGemma-2B, one pass per K-12 harm policy, run concurrently · <b>fails closed</b> (unreachable = block) · logs are metadata-only, no student content at rest.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 CORRECTNESS -->
+  <section id="gates" class="reveal">
+    <div class="sec-num"><span>03</span><span class="bar"></span><span>Deep dive · correctness</span></div>
+    <div class="sec-head">
+      <h2>&ldquo;The model proposes, the solver decides&rdquo;</h2>
+      <p class="lead">Why a small model can be trusted to draw a working circuit: it never gets the last word.</p>
+    </div>
+
+    <figure class="figure">
+      <svg id="pipe" viewBox="0 0 860 210" width="100%" role="img" aria-label="Pipeline: prompt to grammar-constrained decode to rules check to render, with a rejection-sampling loop back to decode on failure.">
+        <g class="stage" data-i="0"><title>Student prompt</title>
+          <rect class="box" x="8" y="78" width="126" height="54" rx="7"/>
+          <text class="lbl" x="71" y="100" text-anchor="middle">Student</text>
+          <text class="lbl" x="71" y="118" text-anchor="middle">prompt</text>
+        </g>
+        <g class="stage" data-i="1"><title>Constrained decode — the model proposes</title>
+          <rect class="box-p" x="182" y="70" width="150" height="70" rx="7"/>
+          <text class="lbl" x="257" y="94" text-anchor="middle">Constrained</text>
+          <text class="lbl" x="257" y="112" text-anchor="middle">decode</text>
+          <text class="lbl-s" x="257" y="129" text-anchor="middle">GBNF grammar</text>
+        </g>
+        <g class="stage" data-i="2"><title>Rules check — the checker decides</title>
+          <rect class="box" x="382" y="70" width="150" height="70" rx="7"/>
+          <text class="lbl" x="457" y="94" text-anchor="middle">Rules check</text>
+          <text class="lbl-s" x="457" y="112" text-anchor="middle">ERC · geometry</text>
+          <text class="lbl-s" x="457" y="128" text-anchor="middle">· formula</text>
+        </g>
+        <g class="stage" data-i="3"><title>Solver / render</title>
+          <rect class="box" x="582" y="78" width="120" height="54" rx="7"/>
+          <text class="lbl" x="642" y="100" text-anchor="middle">Solver /</text>
+          <text class="lbl" x="642" y="118" text-anchor="middle">render</text>
+        </g>
+        <g class="stage" data-i="4"><title>Student — valid output only</title>
+          <rect class="box" x="742" y="78" width="110" height="54" rx="7"/>
+          <text class="lbl" x="797" y="103" text-anchor="middle">Student</text>
+          <text class="lbl-s" x="797" y="120" text-anchor="middle">valid only</text>
+        </g>
+        <g stroke-width="1.6">
+          <path class="flow" d="M134 105 H176" marker-end="url(#ah)"/>
+          <path class="flow" d="M332 105 H376" marker-end="url(#ah)"/>
+          <path class="flow" d="M532 105 H576" marker-end="url(#ah)"/>
+          <path class="flow" d="M702 105 H736" marker-end="url(#ah)"/>
+          <path class="flow-b" d="M457 140 V178 H257 V146" marker-end="url(#ahb)"/>
+          <text class="lbl-s" x="357" y="196" text-anchor="middle" fill="var(--accent)">fail → resample / repair</text>
+        </g>
+        <circle id="dot" cx="71" cy="105" r="6" opacity="0"></circle>
+        <defs>
+          <marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--faint)"/></marker>
+          <marker id="ahb" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--accent)"/></marker>
+        </defs>
+      </svg>
+      <figcaption>Three layers keep a small CPU model reliable: a grammar makes output well-formed, a checker makes it valid, and rejection sampling keeps trying until it passes.</figcaption>
+      <div class="runrow">
+        <button class="runbtn" id="runbtn" type="button">▶&nbsp; Run the pipeline</button>
+        <span class="runstatus" id="runstatus">Watch a draft fail the check, resample, then pass. Hover any stage to highlight it.</span>
+      </div>
+    </figure>
+
+    <div class="subgrid">
+      <div>
+        <h3>Circuits</h3>
+        <p>The model emits a <b>netlist</b> — components plus the nets joining their pins. A grammar guarantees valid JSON with known parts; an electrical-rules check rejects shorts, unpowered nets, and un-current-limited LEDs; ngspice / avr8js actually simulate the survivor.</p>
+      </div>
+      <div>
+        <h3>CAD &amp; sheets</h3>
+        <p>Floor plans pass a geometry gate (inside bounds, no overlaps) with auto-repair before they render or export to DXF. Spreadsheet routes gate the formula on both generation and tutoring, so a student never copies a formula that doesn't compute.</p>
+      </div>
+    </div>
+    <p class="muted measure" style="margin-top:1.8em">A quiet but important detail: the dataset synthesizer and the serving gateway <b>import the same schema and system prompt</b>. The model is always trained on exactly the instruction it is served with — no train/serve skew.</p>
+  </section>
+
+  <!-- 04 SERVING -->
+  <section id="serving" class="reveal">
+    <div class="sec-num"><span>04</span><span class="bar"></span><span>Deep dive · serving</span></div>
+    <div class="sec-head">
+      <h2>Two model families, one budget</h2>
+      <p class="lead">Free tutoring shouldn't need a GPU; paid, multimodal tutoring should feel instant. So the stack spans two base families across CPU and GPU.</p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <caption>ParaClient model tiers</caption>
+        <thead><tr><th>Tier</th><th>Base model</th><th>Runs on</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">v2</td><td><span class="badge q">Qwen 2.5 · 7B</span></td><td>CPU · llama.cpp</td><td>Free default — responsive tutoring</td></tr>
+          <tr><td class="mono">v3</td><td><span class="badge q">Qwen 2.5 · 14B</span></td><td>CPU · llama.cpp</td><td>Free opt-in — stronger reasoning</td></tr>
+          <tr><td class="mono">v4</td><td><span class="badge">Gemma-4 · 12B</span></td><td>GPU · vLLM</td><td>Paid — multimodal, image + handwriting</td></tr>
+          <tr><td class="mono">circuit</td><td><span class="badge q">Qwen 2.5 · 3B</span></td><td>CPU · llama.cpp</td><td>Specialist — grammar-constrained netlists</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="muted measure" style="margin-top:1.4em">Both families carry the same per-subject LoRA adapters and honor the same two teaching modes, so the pedagogy is identical whether a student is on free CPU or paid GPU.</p>
+
+    <div class="quant" style="margin-top:40px">
+      <div>
+        <h3>Quantizing v4 to FP8</h3>
+        <p>The Gemma-4 12B tier first ran in 4-bit via in-flight dequantization, which forced eager execution — no CUDA graphs, and slow. Moving to native <b>FP8</b> on the L4's Ada cores restored graph capture and roughly tripled throughput at the same quality class, still on a single 24 GB card.</p>
+        <ul class="arrows">
+          <li><b>2.6×</b> faster base-model decode</li>
+          <li><b>3.3×</b> faster with a LoRA adapter loaded</li>
+          <li><b>2.3×</b> faster to first token</li>
+        </ul>
+      </div>
+      <div class="bars">
+        <div class="bar">
+          <div class="bl"><span>Decode · base</span><span>tokens / sec</span></div>
+          <div class="track"><div class="fill new" style="width:100%"></div></div>
+          <div class="track"><div class="fill old" style="width:39%"></div></div>
+          <div class="barcap"><span class="hi">16.1 · FP8</span><span>6.2 · 4-bit</span></div>
+        </div>
+        <div class="bar">
+          <div class="bl"><span>Decode · + adapter</span><span>tokens / sec</span></div>
+          <div class="track"><div class="fill new" style="width:100%"></div></div>
+          <div class="track"><div class="fill old" style="width:30%"></div></div>
+          <div class="barcap"><span class="hi">15.3 · FP8</span><span>4.6 · 4-bit</span></div>
+        </div>
+      </div>
+    </div>
+    <p class="mono muted" style="margin-top:1.6em; font-size:.78rem">Measured on 1× NVIDIA L4 (24 GB), vLLM 0.26, greedy decode, 200-token generations. Quality spot-checked across base + subject adapters.</p>
+  </section>
+
+  <!-- 05 SAFETY -->
+  <section id="safety" class="reveal">
+    <div class="sec-num"><span>05</span><span class="bar"></span><span>Deep dive · safety</span></div>
+    <div class="sec-head"><h2>Why moderation had to be local</h2></div>
+    <div class="measure">
+      <p>The obvious way to moderate a child-facing product is a cloud safety API. For ParaClient that's disqualifying — it means transmitting a student's words to a third party. So the safety layer is a local classifier, and it screens in both directions: the student's input <em>and</em> the tutor's output.</p>
+      <p>One finding shaped the design. ShieldGemma is a probability classifier trained <b>one policy at a time</b>; asking it about a merged policy badly under-detects (empirically <span class="mono">P(yes)=0.02</span> for a racist joke), while a single-policy prompt separates cleanly (<span class="mono">0.98</span> vs <span class="mono">0.00</span>). So we run one pass per K-12 harm category — sexual, violence, hate, dangerous — concurrently, and flag the specific category that crosses threshold.</p>
+    </div>
+
+    <div class="principles">
+      <div><div class="p-num">Principle 01</div><h3>Fail closed</h3><p>If the classifier is unreachable, the request is <b>blocked</b>, not allowed. Unavailable moderation is never &ldquo;safe&rdquo; for a child-facing product.</p></div>
+      <div><div class="p-num">Principle 02</div><h3>Metadata only</h3><p>Moderation logs record that a screen happened and which category fired — <b>never the content itself</b>. Nothing sensitive sits at rest.</p></div>
+    </div>
+    <p class="muted measure" style="margin-top:1.8em">The classifier is a guardrail <em>outside</em> the model, by design. The adapter's training is not the safety net; a separate, auditable system is.</p>
+  </section>
+
+  <!-- 06 TIMELINE -->
+  <section id="timeline" class="reveal">
+    <div class="sec-num"><span>06</span><span class="bar"></span><span>How it came together</span></div>
+    <div class="sec-head">
+      <h2>Eighteen days, one box</h2>
+      <p class="lead">Every capability below shipped and is served on the same single-GPU machine. Hover a point for what landed.</p>
+    </div>
+    <figure class="figure chart">
+      <div class="chartwrap">
+        <svg id="tl" viewBox="0 0 860 320" role="img" aria-label="Line chart: cumulative capabilities shipped from July 21 to August 8, 2026. Hover points for milestone details."></svg>
+        <div class="tip" id="tltip"></div>
+      </div>
+      <figcaption>Cumulative major capabilities shipped, 21 Jul – 8 Aug 2026 — a curated tally from the build history. Each point is a milestone; hover (or tap) for detail.</figcaption>
+    </figure>
+  </section>
+
+</div><!-- /page -->
+
+<footer>
+  <div class="page">
+    <div class="brand">
+      <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="var(--ink)" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M12 2.5 L20.23 7.25 L20.23 16.75 L12 21.5 L3.77 16.75 L3.77 7.25 Z"/>
+        <path d="M12 2.5 L12 21.5 M20.23 7.25 L3.77 16.75 M3.77 7.25 L20.23 16.75"/>
+      </svg>
+      ParaFrames
+    </div>
+    <p class="note">
+      ParaClient is built and served on-prem. Free tutoring runs on CPU; paid multimodal tutoring runs on a single GPU. A student's text is screened locally and never leaves the box.<br>
+      research.paraframes.org
+    </p>
+    <p class="disc">
+      These notes describe engineering and research decisions in the ParaClient system. Performance figures are internal measurements on the hardware noted and will vary with load and configuration. Model families: Qwen 2.5 (Apache-2.0) and Gemma-4, each carrying ParaFrames' own subject adapters.
+    </p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var root=document.documentElement; root.classList.add("js");
+  var reduce=window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* theme toggle */
+  var tbtn=document.getElementById("themeBtn");
+  function current(){var s=root.getAttribute("data-theme"); if(s)return s; return (window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light";}
+  if(tbtn) tbtn.addEventListener("click",function(){var n=current()==="dark"?"light":"dark"; root.setAttribute("data-theme",n); try{localStorage.setItem("pf-theme",n);}catch(e){}});
+
+  /* reveal on scroll + trigger the bar animation when Serving enters */
+  var secs=[].slice.call(document.querySelectorAll("section[id]"));
+  if("IntersectionObserver" in window){
+    var io=new IntersectionObserver(function(es){
+      es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); if(e.target.id==="serving") animateBars(); io.unobserve(e.target); } });
+    },{threshold:0.12});
+    secs.forEach(function(s){ io.observe(s); });
+  } else { secs.forEach(function(s){ s.classList.add("in"); }); }
+
+  var barsDone=false;
+  function animateBars(){
+    if(barsDone||reduce) return; barsDone=true;
+    [].slice.call(document.querySelectorAll(".bars .fill")).forEach(function(f){
+      var w=f.style.width; f.style.transition="none"; f.style.width="0";
+      requestAnimationFrame(function(){ requestAnimationFrame(function(){ f.style.transition=""; f.style.width=w; }); });
+    });
+  }
+
+  /* scrollspy for the top nav */
+  var links={}; [].slice.call(document.querySelectorAll(".top nav a")).forEach(function(a){ links[a.getAttribute("href").slice(1)]=a; });
+  function spy(){ var y=window.scrollY+150, cur=null; secs.forEach(function(s){ if(s.offsetTop<=y) cur=s; }); Object.keys(links).forEach(function(k){ links[k].classList.remove("active"); }); if(cur&&links[cur.id]) links[cur.id].classList.add("active"); }
+  window.addEventListener("scroll", spy, {passive:true}); spy();
+
+  /* runnable pipeline: a token flows decode -> check, fails, resamples, passes */
+  var svg=document.getElementById("pipe"), dot=document.getElementById("dot"), rbtn=document.getElementById("runbtn"), rstat=document.getElementById("runstatus");
+  if(svg&&dot&&rbtn){
+    var stages=[].slice.call(svg.querySelectorAll(".stage"));
+    var pts=[[71,105,0,""],[257,105,1,"The model proposes a draft"],[457,105,2,"Checker runs…"],[457,178,-1,""],[257,178,-1,""],[257,140,-1,""],[257,105,1,"✗ failed — resample"],[457,105,2,"Checker runs…"],[642,105,3,"✓ valid — render"],[797,105,4,"Delivered to student"]];
+    function lite(i){ stages.forEach(function(s){ s.classList.remove("lit"); }); if(i>=0&&stages[i]) stages[i].classList.add("lit"); }
+    function run(){
+      if(reduce){ lite(4); dot.setAttribute("cx",797); dot.setAttribute("cy",105); dot.setAttribute("opacity","1"); rstat.textContent="Delivered to student ✓"; return; }
+      rbtn.disabled=true; rstat.textContent=""; lite(0);
+      dot.setAttribute("cx",pts[0][0]); dot.setAttribute("cy",pts[0][1]); dot.setAttribute("opacity","1");
+      var i=0, speed=300;
+      (function nextSeg(){
+        if(i>=pts.length-1){ rbtn.disabled=false; rstat.textContent="Delivered to student ✓"; return; }
+        var a=pts[i], b=pts[i+1], dx=b[0]-a[0], dy=b[1]-a[1], dur=Math.max(140,Math.hypot(dx,dy)/speed*1000), t0=null;
+        function step(ts){ if(t0===null)t0=ts; var k=Math.min(1,(ts-t0)/dur);
+          dot.setAttribute("cx",(a[0]+dx*k).toFixed(1)); dot.setAttribute("cy",(a[1]+dy*k).toFixed(1));
+          if(k<1){ requestAnimationFrame(step); }
+          else { i++; var node=pts[i]; if(node[2]>=0) lite(node[2]); if(node[3]) rstat.textContent=node[3]; setTimeout(nextSeg, node[2]>=0?320:20); }
+        }
+        requestAnimationFrame(step);
+      })();
+    }
+    rbtn.addEventListener("click", run);
+  }
+
+  /* hoverable timeline chart */
+  (function timeline(){
+    var svg=document.getElementById("tl"), tip=document.getElementById("tltip");
+    if(!svg||!tip) return;
+    var wrap=svg.parentNode;
+    var data=[
+      {d:"2026-07-21", y:1,  t:"Tutor core", x:"QLoRA adapter pipeline on Qwen 2.5; socratic + graduated-hint modes learned from data."},
+      {d:"2026-07-23", y:2,  t:"Safety filter", x:"First content-safety layer and a safe tutor proxy wrapped around the model."},
+      {d:"2026-08-02", y:6,  t:"Maker stack + civics data", x:"CAD, circuit, agentic docs/slides and a RAG gateway; plus a human-review-gated civics dataset pipeline."},
+      {d:"2026-08-03", y:8,  t:"Valid-by-construction + 14B", x:"Floor plans guaranteed by a geometric gate with auto-repair; 14B (AWQ) served on vLLM, systemd-managed."},
+      {d:"2026-08-04", y:11, t:"Spreadsheet, notes, civics routes", x:"Formula-gated spreadsheets; handwriting and math notes; civics split into static adapter vs live official-source agent."},
+      {d:"2026-08-05", y:12, t:"Gemma-4 v4", x:"Cutover to the multimodal Gemma-4 12B base with adaptersG4 on the L4."},
+      {d:"2026-08-06", y:17, t:"Tiers + on-prem safety", x:"v2/v3/v4 tiers and CPU free tiers; ShieldGemma-2B moderation; COPPA/FERPA on-prem civics; metadata-only logs."},
+      {d:"2026-08-07", y:18, t:"Right to erasure", x:"/v1/account/delete — data deletion and under-13 takedown."},
+      {d:"2026-08-08", y:19, t:"FP8 quantization", x:"v4 moved to native FP8 — 2.6 to 3.3x throughput on the same single L4."}
+    ];
+    var W=860,H=320,mL=40,mR=18,mT=22,mB=46, pw=W-mL-mR, ph=H-mT-mB, yMax=20;
+    var t0=Date.parse(data[0].d), t1=Date.parse(data[data.length-1].d);
+    function X(d){ return mL + (Date.parse(d)-t0)/(t1-t0)*pw; }
+    function Y(v){ return mT + (1 - v/yMax)*ph; }
+    var NS="http://www.w3.org/2000/svg";
+    function el(n,a){ var e=document.createElementNS(NS,n); for(var k in a) e.setAttribute(k,a[k]); return e; }
+    [0,5,10,15,20].forEach(function(v){
+      svg.appendChild(el("line",{"class":"grid",x1:mL,y1:Y(v),x2:W-mR,y2:Y(v)}));
+      var tx=el("text",{"class":"axl",x:mL-8,y:Y(v)+3,"text-anchor":"end"}); tx.textContent=v; svg.appendChild(tx);
+    });
+    data.forEach(function(p,idx){
+      if(idx===0||idx===data.length-1||p.d==="2026-08-02"||p.d==="2026-08-06"){
+        var lab=new Date(p.d+"T00:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"});
+        var tx=el("text",{"class":"axl",x:X(p.d),y:H-mB+18,"text-anchor":"middle"}); tx.textContent=lab; svg.appendChild(tx);
+      }
+    });
+    var dLine="", dArea="M"+X(data[0].d).toFixed(1)+" "+Y(0).toFixed(1);
+    data.forEach(function(p,i){ var cx=X(p.d).toFixed(1), cy=Y(p.y).toFixed(1); dLine+=(i?"L":"M")+cx+" "+cy+" "; dArea+="L"+cx+" "+cy+" "; });
+    dArea+="L"+X(data[data.length-1].d).toFixed(1)+" "+Y(0).toFixed(1)+" Z";
+    svg.appendChild(el("path",{"class":"ar",d:dArea}));
+    svg.appendChild(el("path",{"class":"ln",d:dLine}));
+    data.forEach(function(p){
+      var cx=X(p.d), cy=Y(p.y);
+      var pt=el("circle",{"class":"pt",cx:cx,cy:cy,r:4.5});
+      var hit=el("circle",{"class":"hit",cx:cx,cy:cy,r:15});
+      svg.appendChild(pt); svg.appendChild(hit);
+      function show(){
+        pt.setAttribute("r",7);
+        var dd=new Date(p.d+"T00:00:00").toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
+        tip.innerHTML='<div class="d">'+dd+'</div><div class="t">'+p.t+'</div><div class="x">'+p.x+'</div>';
+        var r=hit.getBoundingClientRect(), wr=wrap.getBoundingClientRect();
+        tip.style.left=(r.left-wr.left+r.width/2)+"px";
+        if(cy<130){ tip.classList.add("below"); tip.style.top=(r.top-wr.top+r.height)+"px"; }
+        else { tip.classList.remove("below"); tip.style.top=(r.top-wr.top)+"px"; }
+        tip.classList.add("on");
+      }
+      function hide(){ pt.setAttribute("r",4.5); tip.classList.remove("on"); }
+      hit.addEventListener("pointerenter",show);
+      hit.addEventListener("pointerleave",hide);
+      hit.addEventListener("click",show);
+    });
+  })();
+})();
+</script>
+
+</body>
+</html>
