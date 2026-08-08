@@ -225,6 +225,24 @@ os.environ["PARACLIENT_ENV"] = "prod"
 check("prod signups get the Plus tier", accounts.default_tier() == "plus")
 os.environ["PARACLIENT_ENV"] = "dev"
 
+print("\n=== product naming: Kalvi (edu) vs ParaClient (consumer) ===")
+edu = {"audience": "edu", "tier": "paid"}
+con = {"audience": "consumer", "tier": "plus"}
+check("edu product is Kalvi", gw.product_for(edu) == "Kalvi")
+check("consumer product is ParaClient", gw.product_for(con) == "ParaClient")
+for v, want in [("v2", "Kalvi 2"), ("v3", "Kalvi 3"), ("v4", "Kalvi 4")]:
+    got = gw.display_version(edu, v)
+    check(f"edu {v} displays as {want}", got == want, f"got {got}")
+check("consumer v4 displays as ParaClient 4",
+      gw.display_version(con, "v4") == "ParaClient 4")
+check("internal/dev keeps the ParaClient name",
+      gw.product_for({"audience": "internal"}) == "ParaClient")
+check("edu version list maps in order",
+      gw.display_versions(edu, ["v2", "v3", "v4"]) == ["Kalvi 2", "Kalvi 3", "Kalvi 4"])
+# The serving contract must NOT be renamed by the branding layer.
+check("served model ids are untouched by branding",
+      gw.model_for("socratic", "math") == "ParaFrames/ParaClient-math-v2.2")
+
 print("\n=== monthly usage quotas (free 1x, plus 2x, premiere 20x) ===")
 qf = gw.monthly_quota_for({"tier": "free"})
 qp = gw.monthly_quota_for({"tier": "plus"})

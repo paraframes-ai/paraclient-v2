@@ -237,6 +237,31 @@ def human_bytes(n: int) -> str:
     return f"{n // _TB} TB" if n >= _TB else f"{n // _GB} GB"
 
 
+# Product naming. The EDU line is branded KALVI; consumer stays ParaClient.
+# Generations line up one-for-one, so v2/v3/v4 read as Kalvi 2/3/4 to a school
+# and ParaClient 2/3/4 to a consumer -- the same served weights either way.
+#
+# This is a DISPLAY layer only. The vLLM --served-model-name and the LoRA module
+# names (ParaFrames/ParaClient-*-v2.2) are the serving contract and are
+# deliberately untouched: renaming them would require re-serving the GPU and
+# re-pointing every adapter for what is a branding change.
+EDU_PRODUCT = "Kalvi"
+CONSUMER_PRODUCT = "ParaClient"
+
+
+def product_for(rec: dict) -> str:
+    return EDU_PRODUCT if rec.get("audience") == "edu" else CONSUMER_PRODUCT
+
+
+def display_version(rec: dict, version: str) -> str:
+    """'v4' -> 'Kalvi 4' for a school, 'ParaClient 4' for a consumer."""
+    return f"{product_for(rec)} {str(version).lstrip('v')}"
+
+
+def display_versions(rec: dict, versions) -> list:
+    return [display_version(rec, v) for v in versions]
+
+
 def versions_for_tier(tier: str) -> list:
     return sorted(v for v, tiers in VERSION_ACCESS.items() if tier in tiers)
 
@@ -532,6 +557,8 @@ def build_app(tutor_url: str, tutor_key: str):
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
                 "tier": tier_of(rec), "allowed_versions": versions_for(rec),
+                "product": product_for(rec),
+                "allowed_model_names": display_versions(rec, versions_for(rec)),
                 "plan": TIER_LABEL.get(tier_of(rec), "Free"),
                 # e2 owns the Knowledge Library files, so it enforces the quota;
                 # the gateway is the single source of truth for what it IS.
@@ -621,6 +648,8 @@ def build_app(tutor_url: str, tutor_key: str):
                 "status": acct.get("status", "active"),
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
                 "allowed_versions": versions_for(rec),
+                "product": product_for(rec),
+                "allowed_model_names": display_versions(rec, versions_for(rec)),
                 "library_storage_bytes": storage_bytes_for(rec),
                 "library_storage": human_bytes(storage_bytes_for(rec)),
                 "rate_limited": rpm_for(rec) is not None,
@@ -828,6 +857,10 @@ def build_app(tutor_url: str, tutor_key: str):
             answer = dout.student_message
         return JSONResponse({"role": "assistant", "content": answer,
                              "version": version, "model": model,
+                             # What the student/teacher should see. `model` above
+                             # stays the internal serving id.
+                             "product": product_for(rec),
+                             "model_name": display_version(rec, version),
                              "safety": {"action": dout.action.value}})
 
     @app.post("/v1/generate")
