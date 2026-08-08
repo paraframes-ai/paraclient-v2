@@ -137,9 +137,52 @@ TIER_STORAGE_BYTES = {
     "paid":       1 * _TB,          # legacy alias of plus
 }
 
-# Rate limiting is applied to DEV KEYS ONLY (see auth()). Real user tiers are
-# unlimited for now.
-RATE_LIMITED_TIERS = {"dev"}
+# Rate limiting: EVERY tier is capped except dev, which is exempt so internal
+# tooling and load tests are never throttled by their own gateway.
+# Per-minute request caps. These are deliberately generous — the L4 generates at
+# ~16 tok/s, so a real 400-token answer already takes ~25s and no human
+# approaches these numbers. They exist to stop a runaway loop or an abusive
+# signup from monopolising the single GPU, not to shape normal use.
+UNLIMITED_TIERS = {"dev"}
+TIER_RPM = {"free": 20, "plus": 60, "premiere": 120, "paid": 60}
+DEFAULT_RPM = 20
+
+
+# Monthly USAGE quota — distinct from the per-minute rate limit above. The rate
+# limit stops a burst; this caps what a plan is worth over a month.
+#   Free      1x   (baseline)
+#   Plus      2x free
+#   Premiere  10x plus  = 20x free
+#   Dev       exempt
+# Metered in REQUESTS (a tutoring turn is the unit a user understands). The
+# meter also accumulates tokens for capacity planning; only requests are
+# enforced, so switching the enforced unit later needs no schema change.
+FREE_MONTHLY_REQUESTS = 500
+TIER_MONTHLY_REQUESTS = {
+    "free":     FREE_MONTHLY_REQUESTS,           #    500
+    "plus":     FREE_MONTHLY_REQUESTS * 2,       #  1,000
+    "premiere": FREE_MONTHLY_REQUESTS * 20,      # 10,000  (= 10x plus)
+    "paid":     FREE_MONTHLY_REQUESTS * 2,       # legacy alias of plus
+}
+
+
+def monthly_quota_for(rec: dict) -> int | None:
+    """Requests-per-month allowance, or None if the tier is exempt."""
+    tier = tier_of(rec)
+    if tier in UNLIMITED_TIERS:
+        return None
+    return TIER_MONTHLY_REQUESTS.get(tier, FREE_MONTHLY_REQUESTS)
+
+
+def rpm_for(rec: dict) -> int | None:
+    """Per-minute cap for this key, or None if the tier is exempt.
+
+    An explicit `rpm` on the key record wins (that is how the legacy keystore
+    sets per-key limits); otherwise the tier's default applies."""
+    tier = tier_of(rec)
+    if tier in UNLIMITED_TIERS:
+        return None
+    return rec.get("rpm") or TIER_RPM.get(tier, DEFAULT_RPM)
 
 
 def tier_of(rec: dict) -> str:
@@ -418,19 +461,32 @@ def build_app(tutor_url: str, tutor_key: str):
     def auth(authorization: str | None):
         """Validate + rate-limit (for the model/generation routes).
 
-        Rate limiting applies to DEV KEYS ONLY (RATE_LIMITED_TIERS). Real user
-        tiers are deliberately unlimited for now; the cap is kept on dev keys so
-        a runaway test loop can't saturate the GPU during development.
-
-        NOTE this leaves user traffic uncapped on a single-GPU box: one account
-        can occupy the v4 queue for everyone, and signup is self-serve. Re-arm
-        by adding tiers to RATE_LIMITED_TIERS (one-line change) when abuse
-        controls matter more than headroom.
+        Two independent limits, both exempt for dev (UNLIMITED_TIERS):
+          * RATE  — requests/minute, per key. Stops a burst (TIER_RPM).
+          * USAGE — requests/month, per user. Caps what a plan is worth
+                    (TIER_MONTHLY_REQUESTS). Metered here because auth() is the
+                    one choke point every model route funnels through; that
+                    counts a request at admission, so a turn later refused by
+                    the safety filter still consumes quota.
         """
         tok, rec = lookup(authorization)
-        if tier_of(rec) in RATE_LIMITED_TIERS:
-            if not rl.allow(tok, rec.get("rpm", 120), time.time()):
-                raise HTTPException(429, "rate limit exceeded")
+        rpm = rpm_for(rec)
+        if rpm is not None and not rl.allow(tok, rpm, time.time()):
+            raise HTTPException(
+                429, f"rate limit exceeded ({rpm}/min for the "
+                     f"{TIER_LABEL.get(tier_of(rec), 'Free')} plan)")
+
+        quota = monthly_quota_for(rec)
+        if quota is not None:
+            user = rec.get("user")
+            used = accounts.usage_for(user)["requests"]
+            if used >= quota:
+                plan = TIER_LABEL.get(tier_of(rec), "Free")
+                raise HTTPException(
+                    402, f"monthly usage limit reached ({used}/{quota} requests "
+                         f"on the {plan} plan). It resets at the start of next "
+                         f"month, or upgrade for a higher limit.")
+            accounts.record_usage(user, requests=1)
         return rec
 
     @app.post("/v1/auth/validate")
@@ -447,7 +503,9 @@ def build_app(tutor_url: str, tutor_key: str):
                 # e2 owns the Knowledge Library files, so it enforces the quota;
                 # the gateway is the single source of truth for what it IS.
                 "library_storage_bytes": storage_bytes_for(rec),
-                "library_storage": human_bytes(storage_bytes_for(rec))}
+                "library_storage": human_bytes(storage_bytes_for(rec)),
+                "monthly_request_limit": monthly_quota_for(rec),
+                "rpm": rpm_for(rec)}
 
     # ---------------- Accounts: age gate -> signup -> login ----------------
     # The gate is a SEPARATE endpoint on purpose: compliance/01 §1 requires the
@@ -529,7 +587,19 @@ def build_app(tutor_url: str, tutor_key: str):
                 "allowed_versions": versions_for(rec),
                 "library_storage_bytes": storage_bytes_for(rec),
                 "library_storage": human_bytes(storage_bytes_for(rec)),
-                "rate_limited": tier_of(rec) in RATE_LIMITED_TIERS}
+                "rate_limited": rpm_for(rec) is not None,
+                "rpm": rpm_for(rec),
+                "usage": _usage_block(rec)}
+
+    def _usage_block(rec: dict) -> dict:
+        """This period's meter vs the plan's allowance."""
+        u = accounts.usage_for(rec.get("user"))
+        quota = monthly_quota_for(rec)
+        return {"period": u["period"], "requests_used": u["requests"],
+                "requests_limit": quota,
+                "requests_remaining": (None if quota is None
+                                       else max(0, quota - u["requests"])),
+                "tokens_used": u["tokens"], "unlimited": quota is None}
 
     @app.post("/v1/account/suspend")
     async def account_suspend(request: Request,

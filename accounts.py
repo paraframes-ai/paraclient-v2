@@ -143,6 +143,17 @@ def init_db() -> None:
             at         REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_login_email ON login_attempts(email);
+        -- Monthly usage meter. Deliberately NOT foreign-keyed to accounts:
+        -- legacy keystore users (demo/internal keys) have no accounts row but
+        -- still need metering. `period` is 'YYYY-MM' so a new month starts a
+        -- new row and the quota resets with no cron job to run.
+        CREATE TABLE IF NOT EXISTS usage (
+            user_id  TEXT NOT NULL,
+            period   TEXT NOT NULL,
+            requests INTEGER NOT NULL DEFAULT 0,
+            tokens   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, period)
+        );
         """)
 
 
@@ -275,7 +286,10 @@ def create_account(email: str, password: str, gate_token: str,
                 "INSERT INTO accounts(user_id,email,pw_hash,pw_salt,audience,"
                 "tier,rpm,age_13plus,age_checked_at,status,created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (user_id, email, pw_hash, salt, "consumer", tier, 30,
+                # rpm 0 = "no per-key override": the gateway applies the tier's
+                # default cap (TIER_RPM). Only the legacy keystore pins per-key
+                # limits explicitly.
+                (user_id, email, pw_hash, salt, "consumer", tier, 0,
                  1, now, "active", now))
     except sqlite3.IntegrityError:
         # Same message whether or not the email exists, so signup cannot be
@@ -374,6 +388,49 @@ def record_for_key(key: str) -> dict | None:
             "tier": row["tier"], "rpm": row["rpm"], "source": "accounts_db"}
 
 
+# --------------------------------------------------------------------------
+# Usage metering (monthly quota)
+# --------------------------------------------------------------------------
+
+def current_period(now: float | None = None) -> str:
+    """Billing period key, 'YYYY-MM'. Using the calendar month as the row key
+    means the quota resets on its own when the month rolls over — there is no
+    reset job that can fail to run."""
+    t = time.gmtime(now if now is not None else time.time())
+    return f"{t.tm_year:04d}-{t.tm_mon:02d}"
+
+
+def record_usage(user_id: str, requests: int = 1, tokens: int = 0) -> None:
+    """Add to this user's meter for the current period."""
+    if not user_id:
+        return
+    with _connect() as con:
+        con.execute(
+            "INSERT INTO usage(user_id, period, requests, tokens) "
+            "VALUES (?,?,?,?) ON CONFLICT(user_id, period) DO UPDATE SET "
+            "requests = requests + excluded.requests, "
+            "tokens   = tokens   + excluded.tokens",
+            (user_id, current_period(), requests, tokens))
+
+
+def usage_for(user_id: str) -> dict:
+    """This period's usage. Missing row = nothing used yet."""
+    with _connect() as con:
+        row = con.execute(
+            "SELECT requests, tokens FROM usage WHERE user_id=? AND period=?",
+            (user_id, current_period())).fetchone()
+    return {"period": current_period(),
+            "requests": row["requests"] if row else 0,
+            "tokens": row["tokens"] if row else 0}
+
+
+def reset_usage(user_id: str) -> None:
+    """Clear a user's meter for this period (support / testing escape hatch)."""
+    with _connect() as con:
+        con.execute("DELETE FROM usage WHERE user_id=? AND period=?",
+                    (user_id, current_period()))
+
+
 def get_account(user_id: str) -> dict | None:
     with _connect() as con:
         row = con.execute(
@@ -411,6 +468,9 @@ def delete_account(user_id: str) -> int:
                         (user_id,)).fetchone()["c"]
         con.execute("DELETE FROM api_keys WHERE user_id=?", (user_id,))
         con.execute("DELETE FROM accounts WHERE user_id=?", (user_id,))
+        # Usage rows are keyed by user_id, not FK-cascaded — erase them too, or
+        # deletion would leave per-user records behind.
+        con.execute("DELETE FROM usage WHERE user_id=?", (user_id,))
     return n
 
 

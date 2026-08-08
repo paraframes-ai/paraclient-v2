@@ -186,10 +186,24 @@ for tier, want, label in [("free", 128 * GB, "128 GB"), ("plus", 1 * TB, "1 TB")
     check(f"{tier} library storage = {label}", got == want,
           f"got {gw.human_bytes(got)}")
 
-# Rate limiting: dev only.
-for tier in ("free", "plus", "premiere", "paid"):
-    check(f"{tier} is NOT rate limited", tier not in gw.RATE_LIMITED_TIERS)
-check("dev IS rate limited", "dev" in gw.RATE_LIMITED_TIERS)
+# Rate limiting: everything IS capped except dev.
+for tier, want in [("free", 20), ("plus", 60), ("premiere", 120), ("paid", 60)]:
+    got = gw.rpm_for({"tier": tier})
+    check(f"{tier} IS rate limited at {want}/min", got == want, f"got {got}")
+check("dev is EXEMPT from rate limiting", gw.rpm_for({"tier": "dev"}) is None)
+check("an explicit per-key rpm overrides the tier default",
+      gw.rpm_for({"tier": "free", "rpm": 999}) == 999)
+check("rpm=0 means 'use the tier default'",
+      gw.rpm_for({"tier": "premiere", "rpm": 0}) == 120)
+check("an unknown tier still gets capped",
+      gw.rpm_for({"tier": "bogus"}) == gw.DEFAULT_RPM)
+
+# The limiter itself must actually block past the cap for a non-dev tier.
+_rl = gw.RateLimiter()
+_now = time.time()
+_blocked = sum(0 if _rl.allow("t", gw.rpm_for({"tier": "free"}), _now) else 1
+               for _ in range(50))
+check("free key is blocked past its cap in a burst", _blocked == 30, f"{_blocked}/50")
 
 # Model access: free is CPU-only; every paid tier reaches v4 (GPU).
 check("free cannot use v4", "v4" not in gw.versions_for_tier("free"))
@@ -210,6 +224,46 @@ check("unknown tier falls back to free",
 os.environ["PARACLIENT_ENV"] = "prod"
 check("prod signups get the Plus tier", accounts.default_tier() == "plus")
 os.environ["PARACLIENT_ENV"] = "dev"
+
+print("\n=== monthly usage quotas (free 1x, plus 2x, premiere 20x) ===")
+qf = gw.monthly_quota_for({"tier": "free"})
+qp = gw.monthly_quota_for({"tier": "plus"})
+qpr = gw.monthly_quota_for({"tier": "premiere"})
+check("plus is exactly 2x free", qp == 2 * qf, f"{qp} vs {qf}")
+check("premiere is exactly 10x plus", qpr == 10 * qp, f"{qpr} vs {qp}")
+check("premiere is exactly 20x free", qpr == 20 * qf, f"{qpr} vs {qf}")
+check("dev is exempt from the usage quota",
+      gw.monthly_quota_for({"tier": "dev"}) is None)
+check("legacy 'paid' gets the Plus quota",
+      gw.monthly_quota_for({"tier": "paid"}) == qp)
+check("an unknown tier gets the free quota",
+      gw.monthly_quota_for({"tier": "bogus"}) == qf)
+
+# The meter itself.
+g2 = accounts.age_gate(dob_str(22))
+m = accounts.create_account("meter@example.com", "a-long-enough-password",
+                            g2["gate_token"])
+check("new account starts at zero usage",
+      accounts.usage_for(m["user"])["requests"] == 0)
+accounts.record_usage(m["user"], requests=3, tokens=250)
+u = accounts.usage_for(m["user"])
+check("usage accumulates requests", u["requests"] == 3, str(u))
+check("usage accumulates tokens", u["tokens"] == 250, str(u))
+accounts.record_usage(m["user"], requests=2)
+check("usage adds across calls",
+      accounts.usage_for(m["user"])["requests"] == 5)
+check("usage period is the current month",
+      accounts.usage_for(m["user"])["period"] == accounts.current_period())
+accounts.reset_usage(m["user"])
+check("usage can be reset", accounts.usage_for(m["user"])["requests"] == 0)
+
+# Erasure must not leave usage rows behind.
+accounts.record_usage(m["user"], requests=7)
+accounts.delete_account(m["user"])
+with accounts._connect() as con:
+    left = con.execute("SELECT COUNT(*) c FROM usage WHERE user_id=?",
+                       (m["user"],)).fetchone()["c"]
+check("deleting an account erases its usage rows", left == 0, f"{left} left")
 
 print(f"\n{'='*54}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
