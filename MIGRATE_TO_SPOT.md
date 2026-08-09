@@ -75,3 +75,19 @@ A Spot VM does not auto-restart when Google reclaims it — it STOPs. For a
 stateful box like this, that's the right behavior (no data loss); just start it
 again. A tiny watchdog on the always-on e2 box can auto-`start` it if you want
 hands-off recovery — ask and it can be added.
+
+## Post-migration fixes applied on the new box (2026-08-09)
+The recreate was the box's first reboot in ~19 days and surfaced latent issues:
+- **NVIDIA driver**: running kernel 6.8.0-1065-gcp had no driver module (an apt
+  kernel upgrade had been sitting unbooted). Installed
+  `linux-modules-nvidia-580-server-open-6.8.0-1065-gcp`, added
+  `/etc/modules-load.d/nvidia.conf` (nvidia, nvidia_uvm) so it auto-loads on
+  every Spot restart, and `apt-mark hold`ed the kernel so a future upgrade
+  can't strand the GPU again on an unattended preemption-reboot.
+- **v2 dropped too**: on 15 GB, v4(vLLM ~9.4G)+v2+guard forced heavy swap and
+  the guard's moderation calls timed out (fail-closed -> everything blocked).
+  Disabled paraclient-v2 as well; the box now runs v4 + guard + gateway.
+- **guard threads**: serve_guard.sh `-t 8` -> `-t 4` to match the 4 vCPUs;
+  moderation went from a 20 s timeout to ~1 s warm.
+- **SA scope**: recreated with cloud-platform -> Vertex Gemini works. Claude
+  still needs a Vertex quota/Model-Garden subscription (429 quota, not scope).
