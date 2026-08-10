@@ -167,6 +167,95 @@ def generate(client, model, kind, user_prompt, retries=3):
 
 
 # --------------------------------------------------------------------------
+# Grammar / schema-guided generation (Project Munivar keystone).
+#
+# The whole point of the efficient on-box generator: a SMALL model doesn't have
+# to be smart enough to emit perfect JSON by luck — the decoder is CONSTRAINED
+# to the schema, so every token it can produce keeps the output valid. Same
+# idea as the circuit route's GBNF grammar, expressed as a JSON Schema so it
+# works unchanged on llama.cpp (`response_format: json_schema`) and vLLM
+# (guided decoding). Structure is guaranteed; a fine-tune only has to improve
+# the words, not the shape.
+#
+# This is what lets doc/slide generation come HOME to a small on-prem model and
+# off the frontier — while web search/fetch stay on-box (DuckDuckGo + httpx),
+# so nothing in the loop needs Vertex.
+# --------------------------------------------------------------------------
+
+def guided_schema(kind: str) -> dict:
+    """JSON Schema the on-box generator is constrained to. Theme enum is derived
+    from THEMES so it never drifts from the renderer."""
+    themes = sorted(THEMES)
+    if kind == "slides":
+        return {
+            "type": "object", "additionalProperties": False,
+            "required": ["title", "subtitle", "theme", "slides"],
+            "properties": {
+                "title": {"type": "string"},
+                "subtitle": {"type": "string"},
+                "theme": {"type": "string", "enum": themes},
+                "slides": {
+                    "type": "array", "minItems": 4, "maxItems": 10,
+                    "items": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["title", "bullets"],
+                        "properties": {
+                            "title": {"type": "string"},
+                            "bullets": {"type": "array", "minItems": 2,
+                                        "maxItems": 5, "items": {"type": "string"}},
+                            "notes": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        }
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": ["title", "theme", "sections"],
+        "properties": {
+            "title": {"type": "string"},
+            "theme": {"type": "string", "enum": themes},
+            "sections": {
+                "type": "array", "minItems": 1,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["heading", "paragraphs"],
+                    "properties": {
+                        "heading": {"type": "string"},
+                        "paragraphs": {"type": "array", "minItems": 1,
+                                       "items": {"type": "string"}},
+                    },
+                },
+            },
+        },
+    }
+
+
+def generate_guided(client, model, kind, user_prompt, retries=2):
+    """Schema-constrained single-pass generation for an on-box model.
+
+    Passes the schema as the OpenAI-standard `response_format: {type:
+    json_schema}` — honoured by llama.cpp's server and vLLM's guided decoding —
+    so the model physically cannot emit malformed structure. Falls back to
+    unconstrained generate() if a backend doesn't support guided decoding, so
+    this is always safe to call."""
+    schema = guided_schema(kind)
+    rf = {"type": "json_schema",
+          "json_schema": {"name": f"paraframes_{kind}", "schema": schema}}
+    last = None
+    for _ in range(retries):
+        try:
+            r = client.chat.completions.create(
+                model=model, messages=build_prompt(kind, user_prompt),
+                max_tokens=4000, temperature=0.3, response_format=rf)
+            return _clean(parse_json(r.choices[0].message.content.strip()))
+        except Exception as e:  # noqa: BLE001 -- backend may not support it
+            last = e
+    # Backend can't guide (or kept failing) -> unconstrained path still works.
+    return generate(client, model, kind, user_prompt)
+
+
+# --------------------------------------------------------------------------
 # Agentic generation (DEV): OUR OWN agent. The local paraclient model runs a
 # search/fetch ReAct loop (tools executed here in Python), then authors the
 # deck/doc. Same output shape as generate() -> renders unchanged. No cloud —
