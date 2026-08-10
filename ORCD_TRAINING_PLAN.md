@@ -124,6 +124,13 @@ over one copy of the content** — i.e. 1 prefill on a smaller model instead of 
 prefills on a 2B. Expected: **<1s** on the same box (≈10× faster), same
 fail-closed semantics, no accuracy regression on our K-12 policies.
 
+> **Implemented.** The full pipeline is built in `guard_distill/` (see its
+> README): `build_corpus.py` → `label_teacher.py` → `train_student.py` (ORCD GPU)
+> → `eval_student.py` → `serve_student.py` (`:8005`). Cutover is one env var:
+> `GUARD_BACKEND=distilled` (`moderation.model_backend()` +
+> `DistilledGuardBackend`). The teacher-labeling and serving/fail-closed paths
+> are verified on the box; only the GPU training step is left to run on ORCD.
+
 ### Method (teacher → student distillation)
 1. **Teacher labels.** Run current ShieldGemma-2B over a large corpus of *our
    own* traffic-shaped text: tutor outputs from every route (safe), plus a

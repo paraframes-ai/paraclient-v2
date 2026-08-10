@@ -40,7 +40,7 @@ from fastapi import HTTPException  # noqa: E402  (module-level: used by resolve_
 # third-party transcription cannot stall every other in-flight request.
 from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from content_filter import ContentFilter, Action, HeuristicBackend  # noqa: E402
-from moderation import ShieldGemmaBackend, CompositeBackend  # noqa: E402
+from moderation import model_backend, CompositeBackend  # noqa: E402
 import accounts  # noqa: E402  (SQLite account store: age gate, signup, login)
 import generate_media as gm  # noqa: E402
 from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
@@ -426,8 +426,11 @@ def build_app(tutor_url: str, tutor_key: str):
     tutor = OpenAI(base_url=tutor_url, api_key=tutor_key)
     # Real on-prem moderation: instant heuristic (self-harm/abuse escalation) +
     # ShieldGemma-2B per-policy classifier (nuanced block-harms). Fails closed.
+    # HeuristicBackend keeps the instant self-harm/abuse ESCALATION signals; the
+    # neural guard (ShieldGemma, or the distilled single-pass student when
+    # GUARD_BACKEND=distilled) does the nuanced block-harm classification.
     filt = ContentFilter(backend=CompositeBackend(
-        [HeuristicBackend(), ShieldGemmaBackend()]))
+        [HeuristicBackend(), model_backend()]))
     keys = load_keys()
     rl = RateLimiter()
 

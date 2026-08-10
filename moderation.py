@@ -114,6 +114,61 @@ class ShieldGemmaBackend(ModerationBackend):
         return {label for label, score in scored if score >= self.threshold}
 
 
+DISTILLED_GUARD_URL = os.environ.get("DISTILLED_GUARD_URL",
+                                     "http://127.0.0.1:8005")
+
+
+class DistilledGuardBackend(ModerationBackend):
+    """Single-pass multi-label K-12 safety classifier distilled from ShieldGemma.
+
+    Drop-in replacement for ShieldGemmaBackend with the SAME contract (same
+    category labels, same GUARD_THRESHOLD, same fail-closed behaviour) but ONE
+    request / ONE forward pass returning all four policy scores at once, instead
+    of four full-content prefills. On the CPU box that turns the ~9.5s guard into
+    <1s -- the dominant chat-latency win (see ORCD_TRAINING_PLAN.md Part B).
+
+    Served by guard_distill/serve_student.py on :8005; trained by
+    guard_distill/train_student.py on ORCD. Selected via GUARD_BACKEND=distilled;
+    until the student model is trained + served, the default stays ShieldGemma.
+    """
+
+    def __init__(self, url: str | None = None, timeout: float = 10.0,
+                 threshold: float | None = None):
+        self.url = (url or DISTILLED_GUARD_URL).rstrip("/")
+        self.timeout = timeout
+        self.threshold = GUARD_THRESHOLD if threshold is None else threshold
+
+    def classify(self, text: str, surface: str) -> set:
+        if not isinstance(text, str) or not text.strip():
+            return set()
+        import httpx
+        try:
+            r = httpx.post(f"{self.url}/classify",
+                           json={"text": text, "surface": surface},
+                           timeout=self.timeout)
+            r.raise_for_status()
+            scores = r.json()["scores"]        # {"sexual": p, "violence": p, ...}
+        except Exception:  # noqa: BLE001 — fail CLOSED (see module docstring)
+            return {"_moderation_unavailable"}
+        return {label for label, score in scores.items()
+                if float(score) >= self.threshold}
+
+
+def model_backend() -> ModerationBackend:
+    """The configured neural guard backend.
+
+    GUARD_BACKEND=distilled swaps ShieldGemma for the faster distilled
+    single-pass classifier once it is trained and served on :8005; anything else
+    (the default) keeps the proven ShieldGemma-2B guard. This is the ONE switch
+    that cuts over the whole safety layer -- no gateway/content_filter changes,
+    because both backends satisfy the same classify() contract.
+    """
+    kind = os.environ.get("GUARD_BACKEND", "shieldgemma").strip().lower()
+    if kind in ("distilled", "distil", "student"):
+        return DistilledGuardBackend()
+    return ShieldGemmaBackend()
+
+
 class CompositeBackend(ModerationBackend):
     """Union of several backends — every label any backend raises is reported."""
 
