@@ -8,4 +8,4 @@ cd "$(dirname "$0")"
 exec llama.cpp/build/bin/llama-server \
   -m models/circuit-q4_k_m.gguf \
   --host 127.0.0.1 --port 8001 \
-  -c 4096 -t 6
+  -c 4096 -t 4

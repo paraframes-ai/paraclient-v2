@@ -1,0 +1,15 @@
+[Unit]
+Description=ParaFrames circuit specialist (Qwen2.5-3B GGUF, CPU llama.cpp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ashwinvbalakrishnan1
+WorkingDirectory=/home/ashwinvbalakrishnan1/paraclient-v2
+ExecStart=/bin/bash /home/ashwinvbalakrishnan1/paraclient-v2/serve_circuit.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

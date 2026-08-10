@@ -24,6 +24,6 @@ HOST="$(tailscale ip -4 2>/dev/null | head -1 || true)"
 HOST="${HOST:-100.122.196.7}"
 
 exec python auth_gateway.py \
-  --tutor-url http://127.0.0.1:8000/v1 \
+  --tutor-url http://127.0.0.1:8002/v1 \
   --host "$HOST" \
   --port 8080

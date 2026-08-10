@@ -1146,7 +1146,7 @@ def build_app(tutor_url: str, tutor_key: str):
             if din.action != Action.ALLOW:
                 return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
 
-        backend = str(body.get("backend", "paraclient")).strip().lower()
+        backend = str(body.get("backend", "gemini")).strip().lower()
         if backend not in NOTES_BACKENDS:
             raise HTTPException(
                 400, f"unknown backend {backend!r} (choose one of "
