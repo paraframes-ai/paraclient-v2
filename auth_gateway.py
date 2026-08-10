@@ -42,6 +42,7 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from content_filter import ContentFilter, Action, HeuristicBackend  # noqa: E402
 from moderation import ShieldGemmaBackend, CompositeBackend  # noqa: E402
 import accounts  # noqa: E402  (SQLite account store: age gate, signup, login)
+from vertex_shim import client_for as vertex_client_for  # noqa: E402
 import generate_media as gm  # noqa: E402
 from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
                         repair_sketch, floorplan_issues)
@@ -211,6 +212,28 @@ def priority_for(rec: dict) -> int:
     """Queue priority for this key. Premiere (and dev) jump ahead of plus,
     which jumps ahead of free, whenever requests contend for the single GPU."""
     return TIER_PRIORITY.get(tier_of(rec), TIER_PRIORITY["free"])
+
+
+# Doc/slide generation (/v1/generate) runs on Vertex, with the MODEL scaling by
+# plan: everyone can generate, but you pay for a better author.
+#   free (and base)   -> cheapest Gemini
+#   plus (paid alias) -> mid Gemini
+#   premiere / dev    -> Claude Opus on Vertex
+# Edu never reaches this route (non-socratic), so off-box generation is fine.
+GEN_MODEL_FREE = os.environ.get("GEN_MODEL_FREE", "gemini-2.5-flash-lite")
+GEN_MODEL_PLUS = os.environ.get("GEN_MODEL_PLUS", "gemini-2.5-flash")
+GEN_MODEL_PREMIERE = os.environ.get("GEN_MODEL_PREMIERE", CLAUDE_PAID_MODEL)
+
+
+def generate_backend_model(rec: dict) -> tuple[str, str]:
+    """(provider, model) for /v1/generate, chosen by plan. provider is
+    'gemini' or 'claude' (both on Vertex)."""
+    tier = tier_of(rec)
+    if tier in ("premiere", "dev"):
+        return ("claude", GEN_MODEL_PREMIERE)
+    if tier in ("plus", "paid"):          # 'paid' is the legacy alias of Plus
+        return ("gemini", GEN_MODEL_PLUS)
+    return ("gemini", GEN_MODEL_FREE)
 
 
 def monthly_quota_for(rec: dict) -> int | None:
@@ -904,9 +927,13 @@ def build_app(tutor_url: str, tutor_key: str):
         din = filt.screen_input(prompt)
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
+        # Docs/slides now author on Vertex (off the local GPU), model by plan:
+        # cheapest Gemini (free) -> mid Gemini (Plus) -> Claude Opus (Premiere/Dev).
+        gen_provider, gen_model = generate_backend_model(rec)
+        gen_client = vertex_client_for(gen_provider)
         try:
-            data = (gm.generate_agentic(tutor, BASE_MODEL, kind, prompt) if web
-                    else gm.generate(tutor, BASE_MODEL, kind, prompt))
+            data = (gm.generate_agentic(gen_client, gen_model, kind, prompt) if web
+                    else gm.generate(gen_client, gen_model, kind, prompt))
             name, theme = gm.pick_theme(data, body.get("theme"))
             ext = "pptx" if kind == "slides" else "docx"
             out = Path("out") / f"gen-{int(time.time()*1000)}.{ext}"
@@ -918,7 +945,8 @@ def build_app(tutor_url: str, tutor_key: str):
                  + ("presentationml.presentation" if kind == "slides"
                     else "wordprocessingml.document"))
         return JSONResponse({"kind": kind, "theme": name, "filename": out.name,
-                             "content_type": ctype, "file_base64": b})
+                             "content_type": ctype, "file_base64": b,
+                             "authored_by": gen_model, "provider": gen_provider})
 
     def _cad_route(mode: str, rec: dict, body: dict):
         # Non-socratic capability -> consumer/internal only (same rule as generate)
