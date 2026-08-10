@@ -456,16 +456,18 @@ def build_app(tutor_url: str, tutor_key: str):
         sys_ins = sys_for(mode, units)
         msgs = [{"role": "system", "content": sys_ins},
                 {"role": "user", "content": prompt}]
+        # On CPU, CAD_MODEL and BASE_MODEL resolve to the SAME v2 server, so the
+        # old two-model x3 loop was up to 6 identical slow generations. One model,
+        # 2 tries — the route's geometry gate + auto-repair fixes the survivor.
         last = None
-        for model in (CAD_MODEL, BASE_MODEL):
-            for _ in range(3):
-                try:
-                    r = tutor.chat.completions.create(
-                        model=model, messages=msgs,
-                        max_tokens=3000, temperature=0.2)
-                    return gm.parse_json(r.choices[0].message.content.strip())
-                except Exception as e:  # noqa: BLE001
-                    last = e
+        for _ in range(2):
+            try:
+                r = tutor.chat.completions.create(
+                    model=CAD_MODEL, messages=msgs,
+                    max_tokens=3000, temperature=0.2)
+                return gm.parse_json(r.choices[0].message.content.strip())
+            except Exception as e:  # noqa: BLE001
+                last = e
         raise RuntimeError(f"CAD ({mode}) generation failed: {last}")
 
     circuit = OpenAI(base_url=CIRCUIT_URL, api_key="none")
@@ -507,20 +509,21 @@ def build_app(tutor_url: str, tutor_key: str):
         (spreadsheet_issues), else the best-effort structurally-clean last one."""
         msgs = [{"role": "system", "content": SPREADSHEET_SYS},
                 {"role": "user", "content": prompt}]
+        # Same as CAD: one model (both resolved to v2 on CPU), 2 tries; the
+        # formula gate validates the survivor.
         last = None
-        for model in (SPREADSHEET_MODEL, BASE_MODEL):
-            for _ in range(3):
-                try:
-                    r = tutor.chat.completions.create(
-                        model=model, messages=msgs,
-                        max_tokens=1500, temperature=0.3)
-                    sheet = clean_spreadsheet(
-                        gm.parse_json(r.choices[0].message.content.strip()))
-                    last = sheet
-                    if spreadsheet_issues(sheet)[0]:
-                        return sheet
-                except Exception:  # noqa: BLE001
-                    pass
+        for _ in range(2):
+            try:
+                r = tutor.chat.completions.create(
+                    model=SPREADSHEET_MODEL, messages=msgs,
+                    max_tokens=1500, temperature=0.3)
+                sheet = clean_spreadsheet(
+                    gm.parse_json(r.choices[0].message.content.strip()))
+                last = sheet
+                if spreadsheet_issues(sheet)[0]:
+                    return sheet
+            except Exception:  # noqa: BLE001
+                pass
         if isinstance(last, dict):
             return last          # formula-imperfect but structurally clean
         raise RuntimeError("no parseable spreadsheet from model")

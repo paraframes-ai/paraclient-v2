@@ -423,7 +423,7 @@
     <div class="sec-num"><span>04</span><span class="bar"></span><span>Deep dive · serving</span></div>
     <div class="sec-head">
       <h2>Two model families, one budget</h2>
-      <p class="lead">Free tutoring shouldn't need a GPU; paid, multimodal tutoring should feel instant. So the stack spans two base families across CPU and GPU.</p>
+      <p class="lead">Free tutoring shouldn't need a GPU; paid tutoring should feel instant. So the stack spans two base families across CPU and GPU.</p>
     </div>
 
     <div class="tablewrap">
@@ -433,7 +433,7 @@
         <tbody>
           <tr><td class="mono">v2</td><td><span class="badge q">Qwen 2.5 · 7B</span></td><td>CPU · llama.cpp</td><td>Free default — responsive tutoring</td></tr>
           <tr><td class="mono">v3</td><td><span class="badge q">Qwen 2.5 · 14B</span></td><td>CPU · llama.cpp</td><td>Free opt-in — stronger reasoning</td></tr>
-          <tr><td class="mono">v4</td><td><span class="badge">Gemma-4 · 12B</span></td><td>GPU · vLLM</td><td>Paid — multimodal, image + handwriting</td></tr>
+          <tr><td class="mono">v4</td><td><span class="badge">Gemma-4 · 12B</span></td><td>GPU · vLLM</td><td>Paid — stronger reasoning</td></tr>
           <tr><td class="mono">circuit</td><td><span class="badge q">Qwen 2.5 · 3B</span></td><td>CPU · llama.cpp</td><td>Specialist — grammar-constrained netlists</td></tr>
         </tbody>
       </table>
@@ -512,7 +512,7 @@
       ParaFrames
     </div>
     <p class="note">
-      ParaClient is built and served on-prem. Free tutoring runs on CPU; paid multimodal tutoring runs on a single GPU. A student's text is screened locally and never leaves the box.<br>
+      ParaClient is built and served on-prem. Free tutoring runs on CPU; paid tutoring runs on a single GPU. A student's text is screened locally and never leaves the box.<br>
       research.paraframes.org
     </p>
     <p class="disc">
@@ -589,8 +589,8 @@
       {d:"2026-07-23", y:2,  t:"Safety filter", x:"First content-safety layer and a safe tutor proxy wrapped around the model."},
       {d:"2026-08-02", y:6,  t:"Maker stack + civics data", x:"CAD, circuit, agentic docs/slides and a RAG gateway; plus a human-review-gated civics dataset pipeline."},
       {d:"2026-08-03", y:8,  t:"Valid-by-construction + 14B", x:"Floor plans guaranteed by a geometric gate with auto-repair; 14B (AWQ) served on vLLM, systemd-managed."},
-      {d:"2026-08-04", y:11, t:"Spreadsheet, notes, civics routes", x:"Formula-gated spreadsheets; handwriting and math notes; civics split into static adapter vs live official-source agent."},
-      {d:"2026-08-05", y:12, t:"Gemma-4 v4", x:"Cutover to the multimodal Gemma-4 12B base with adaptersG4 on the L4."},
+      {d:"2026-08-04", y:11, t:"Spreadsheet + civics routes", x:"Formula-gated spreadsheets; civics split into a static adapter vs a live official-source agent."},
+      {d:"2026-08-05", y:12, t:"Gemma-4 v4", x:"Cutover to the Gemma-4 12B base with adaptersG4 on the L4."},
       {d:"2026-08-06", y:17, t:"Tiers + on-prem safety", x:"v2/v3/v4 tiers and CPU free tiers; ShieldGemma-2B moderation; COPPA/FERPA on-prem civics; metadata-only logs."},
       {d:"2026-08-07", y:18, t:"Right to erasure", x:"/v1/account/delete — data deletion and under-13 takedown."},
       {d:"2026-08-08", y:19, t:"FP8 quantization", x:"v4 moved to native FP8 — 2.6 to 3.3x throughput on the same single L4."}

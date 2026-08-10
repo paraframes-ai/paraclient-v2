@@ -359,7 +359,7 @@ _AGENT_SYS = (
 )
 
 
-def generate_agentic(client, model, kind, user_prompt, max_steps=10, min_research=3):
+def generate_agentic(client, model, kind, user_prompt, max_steps=6, min_research=2):
     """Our own local agent: the paraclient model runs a search/fetch loop (tools
     run here), then returns the doc/slides JSON. Enforces a minimum amount of
     real research before it may finalize; falls back to a single-shot generation
