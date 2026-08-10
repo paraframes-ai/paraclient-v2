@@ -70,6 +70,31 @@ def sys_for(mode: str, units: str) -> str:
     return base.replace("UNITS", units)
 
 
+def guided_schema(mode: str) -> dict:
+    """JSON Schema for guided decoding (`response_format: json_schema`) of a CAD
+    response. Constrains the envelope and each element's `type` to the allowed
+    set — so output always parses and every element is a known shape — while
+    leaving coordinate fields open (additionalProperties). Dimensional
+    correctness is still the job of floorplan_issues + repair_sketch, exactly as
+    circuit erc() owns electrical validity."""
+    if mode == "3d":
+        key, types = "solids", sorted(SOLID_TYPES)
+    else:
+        key, types = "entities", sorted(SKETCH_ENTITIES)
+    return {
+        "type": "object",
+        "properties": {
+            "units": {"type": "string"},
+            key: {"type": "array", "items": {
+                "type": "object",
+                "properties": {"type": {"enum": types}},
+                "required": ["type"], "additionalProperties": True,
+            }},
+        },
+        "required": ["units", key], "additionalProperties": True,
+    }
+
+
 def clean_sketch(data: dict, units: str) -> dict:
     """Keep only well-formed 2D entities; return {units, entities}."""
     ents = data.get("entities", []) if isinstance(data, dict) else []

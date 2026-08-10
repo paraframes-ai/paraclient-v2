@@ -187,6 +187,30 @@ def spreadsheet_issues(data):
     return (not errors), errors
 
 
+def guided_schema() -> dict:
+    """JSON Schema for guided decoding (`response_format: json_schema`), honoured
+    by llama.cpp and vLLM. Guarantees the {title, cells:[{ref, value|formula}]}
+    envelope parses; spreadsheet_issues still recomputes every formula, so the
+    gateway's rejection sampling targets formula/ref errors rather than malformed
+    JSON. `value` may be number or text; extra keys stay open."""
+    return {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "cells": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "ref": {"type": "string"},
+                    "value": {"type": ["number", "string"]},
+                    "formula": {"type": "string"},
+                },
+                "required": ["ref"], "additionalProperties": True,
+            }},
+        },
+        "required": ["title", "cells"], "additionalProperties": True,
+    }
+
+
 def clean_spreadsheet(data, _units=None):
     cells = data.get("cells", []) if isinstance(data, dict) else []
     clean = [c for c in cells if isinstance(c, dict) and "ref" in c

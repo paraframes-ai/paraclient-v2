@@ -185,6 +185,43 @@ def erc(netlist: dict):
     return (len(errs) == 0), errs
 
 
+def guided_schema() -> dict:
+    """JSON Schema for OpenAI-style guided decoding (`response_format:
+    json_schema`) — the portable equivalent of grammar() for llama.cpp builds
+    whose GBNF parser rejects our grammar, and for vLLM. Constrains the envelope
+    and every component `type` to the known set so output always parses into the
+    servable shape; erc() still owns referential + electrical validity, so the
+    gateway's rejection sampling spends its tries on real ERC failures, not on
+    malformed JSON. Coordinate/param fields stay open (additionalProperties)."""
+    return {
+        "type": "object",
+        "properties": {
+            "components": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "type": {"enum": list(COMPONENT_PINS)},
+                    "ohms": {"type": "number"}, "voltage": {"type": "number"},
+                    "farads": {"type": "number"}, "henries": {"type": "number"},
+                    "color": {"type": "string"},
+                },
+                "required": ["id", "type"], "additionalProperties": True,
+            }},
+            "nets": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "nodes": {"type": "array", "items": {"type": "string"},
+                              "minItems": 2},
+                },
+                "required": ["id", "nodes"], "additionalProperties": True,
+            }},
+            "code": {"type": "string"},
+        },
+        "required": ["components", "nets"], "additionalProperties": True,
+    }
+
+
 def clean(netlist: dict) -> dict:
     """Drop unknown components / malformed nets; keep the servable shape."""
     comps = [c for c in netlist.get("components", [])

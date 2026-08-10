@@ -44,15 +44,18 @@ from moderation import ShieldGemmaBackend, CompositeBackend  # noqa: E402
 import accounts  # noqa: E402  (SQLite account store: age gate, signup, login)
 import generate_media as gm  # noqa: E402
 from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
-                        repair_sketch, floorplan_issues)
+                        repair_sketch, floorplan_issues,
+                        guided_schema as cad_guided_schema)
 from circuit_schema import (CIRCUIT_SYS, erc as circuit_erc,  # noqa: E402
-                            clean as circuit_clean)
+                            clean as circuit_clean,
+                            guided_schema as circuit_guided_schema)
 from notes_schema import (normalize_image, notes_messages,  # noqa: E402
                           notes_prompt, clean_transcription, NOTES_SYS)
 from civics_schema import sys_for as civics_sys, is_time_varying  # noqa: E402
 from civics_agent import answer_time_varying  # noqa: E402
 from spreadsheet_schema import (SPREADSHEET_SYS, spreadsheet_issues,  # noqa: E402
-                                clean_spreadsheet, evaluate_sheet)
+                                clean_spreadsheet, evaluate_sheet,
+                                guided_schema as spreadsheet_guided_schema)
 from gemini_backend import (generate as gemini_generate,  # noqa: E402
                             generate_vision as gemini_vision)
 from claude_backend import (generate as claude_generate,  # noqa: E402
@@ -456,15 +459,20 @@ def build_app(tutor_url: str, tutor_key: str):
         sys_ins = sys_for(mode, units)
         msgs = [{"role": "system", "content": sys_ins},
                 {"role": "user", "content": prompt}]
-        # On CPU, CAD_MODEL and BASE_MODEL resolve to the SAME v2 server, so the
-        # old two-model x3 loop was up to 6 identical slow generations. One model,
-        # 2 tries — the route's geometry gate + auto-repair fixes the survivor.
+        # Guided decoding first: `response_format: json_schema` constrains output
+        # to a valid CAD envelope with a known entity/solid `type`, so the model
+        # physically can't emit malformed JSON and the geometry gate + auto-repair
+        # only ever see structurally-clean input. One unguided retry as a
+        # backend-compat fallback (if a llama.cpp build ever rejects the schema).
+        rf = {"type": "json_schema",
+              "json_schema": {"name": f"cad_{mode}",
+                              "schema": cad_guided_schema(mode)}}
         last = None
-        for _ in range(2):
+        for kw in ({"response_format": rf}, {}):
             try:
                 r = tutor.chat.completions.create(
                     model=CAD_MODEL, messages=msgs,
-                    max_tokens=3000, temperature=0.2)
+                    max_tokens=3000, temperature=0.2, **kw)
                 return gm.parse_json(r.choices[0].message.content.strip())
             except Exception as e:  # noqa: BLE001
                 last = e
@@ -487,16 +495,31 @@ def build_app(tutor_url: str, tutor_key: str):
         structurally-clean last result)."""
         msgs = [{"role": "system", "content": CIRCUIT_SYS},
                 {"role": "user", "content": prompt}]
+        # Guided decoding makes every sample valid JSON with known component
+        # types, so ERC rejection sampling spends all 3 tries on *electrical*
+        # validity instead of losing some to malformed JSON.
+        rf = {"type": "json_schema",
+              "json_schema": {"name": "circuit_netlist",
+                              "schema": circuit_guided_schema()}}
         last = None
         for _ in range(3):
             try:
                 r = circuit.chat.completions.create(
                     model="circuit", messages=msgs,
-                    max_tokens=900, temperature=0.4)
+                    max_tokens=900, temperature=0.4, response_format=rf)
                 nl = circuit_clean(gm.parse_json(r.choices[0].message.content.strip()))
                 last = nl
                 if circuit_erc(nl)[0]:
                     return nl
+            except Exception:  # noqa: BLE001
+                pass
+        if last is None:
+            # Guided never parsed -> backend may not support it; unguided fallback.
+            try:
+                r = circuit.chat.completions.create(
+                    model="circuit", messages=msgs,
+                    max_tokens=900, temperature=0.4)
+                last = circuit_clean(gm.parse_json(r.choices[0].message.content.strip()))
             except Exception:  # noqa: BLE001
                 pass
         if isinstance(last, dict):
@@ -509,19 +532,32 @@ def build_app(tutor_url: str, tutor_key: str):
         (spreadsheet_issues), else the best-effort structurally-clean last one."""
         msgs = [{"role": "system", "content": SPREADSHEET_SYS},
                 {"role": "user", "content": prompt}]
-        # Same as CAD: one model (both resolved to v2 on CPU), 2 tries; the
-        # formula gate validates the survivor.
+        # Guided decoding guarantees the {title, cells:[{ref,...}]} envelope
+        # parses, so both tries go to the formula gate (spreadsheet_issues), not
+        # to malformed JSON. Unguided fallback if the backend rejects the schema.
+        rf = {"type": "json_schema",
+              "json_schema": {"name": "spreadsheet",
+                              "schema": spreadsheet_guided_schema()}}
         last = None
         for _ in range(2):
             try:
                 r = tutor.chat.completions.create(
                     model=SPREADSHEET_MODEL, messages=msgs,
-                    max_tokens=1500, temperature=0.3)
+                    max_tokens=1500, temperature=0.3, response_format=rf)
                 sheet = clean_spreadsheet(
                     gm.parse_json(r.choices[0].message.content.strip()))
                 last = sheet
                 if spreadsheet_issues(sheet)[0]:
                     return sheet
+            except Exception:  # noqa: BLE001
+                pass
+        if last is None:
+            try:
+                r = tutor.chat.completions.create(
+                    model=SPREADSHEET_MODEL, messages=msgs,
+                    max_tokens=1500, temperature=0.3)
+                last = clean_spreadsheet(
+                    gm.parse_json(r.choices[0].message.content.strip()))
             except Exception:  # noqa: BLE001
                 pass
         if isinstance(last, dict):
