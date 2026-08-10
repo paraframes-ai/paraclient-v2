@@ -1123,18 +1123,22 @@ def build_app(tutor_url: str, tutor_key: str):
 
         # A photo of a student's own notebook is about as personal as this
         # product gets, so sending it off-box is an explicit, gated choice.
+        #
+        # POLICY: note transcription is the ONE external capability open to
+        # everyone -- every tier gets it, because it's the core scan feature and
+        # there is no on-prem VLM in the CPU-only world. The general external
+        # models (/v1/gemini, /v1/claude-*) stay Premiere/Dev-only; notes is the
+        # deliberate exception.
+        #
+        # The ONE hard exclusion is edu: a child's handwriting must never leave
+        # the box (COPPA/FERPA). `edu` already cannot reach this route (it lacks
+        # the 'normal' mode checked above); this is the belt-and-braces block so
+        # that stays true even if the mode policy is ever loosened.
         if backend != "paraclient":
-            # Belt and braces. `edu` cannot reach this route at all (it lacks
-            # the 'normal' mode checked above), but a child's handwriting must
-            # never leave the box even if that mode policy is ever loosened.
             if rec.get("audience") == "edu":
                 raise HTTPException(
                     403, "edu note transcription stays on-prem; the third-party "
                          "backends are not available for school accounts")
-            if not can_use_external(rec):
-                raise HTTPException(
-                    402, f"the {backend} backend is a Premiere feature "
-                         f"(your plan: {TIER_LABEL.get(tier_of(rec), 'Free')})")
 
         try:
             if backend == "gemini":
