@@ -419,7 +419,7 @@ class RateLimiter:
 
 def build_app(tutor_url: str, tutor_key: str):
     from fastapi import FastAPI, Request, Header, HTTPException
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
     from openai import OpenAI
 
     app = FastAPI(title="ParaFrames API Gateway (dev scaffold)")
@@ -563,6 +563,51 @@ def build_app(tutor_url: str, tutor_key: str):
         if isinstance(last, dict):
             return last          # formula-imperfect but structurally clean
         raise RuntimeError("no parseable spreadsheet from model")
+
+    def _raw_chat_stream(client, model, convo, max_tok, temperature,
+                         extra, meta, version):
+        """Server-Sent-Events token stream for /v1/chat (INTERNAL/dev only).
+
+        Streams the backend's tokens straight through for a fast, live-typing UX
+        in the dev TUI. The user's INPUT is still screened upstream (screen_input
+        in the route) before we ever reach here; only per-token OUTPUT moderation
+        is skipped -- which is why this path is gated to the `internal` audience
+        and never offered to `edu`/`consumer` (they always use the blocking path,
+        where screen_output runs once on the complete answer).
+
+        Why not moderate mid-stream: ShieldGemma on this CPU box costs 10-20s per
+        call (worse under generation contention) and false-positives on partial
+        sentences -- so segment-level moderated streaming is both slower than the
+        blocking path and less correct. Fast streaming for children is blocked on
+        a faster guard (GPU / distilled ShieldGemma), tracked separately.
+
+        Event shapes (SSE `data:` JSON):
+          {"event":"delta","content": "<token text>"}
+          {"event":"done", **meta}
+          {"event":"error","message": "..."}
+        """
+        def _sse(obj):
+            return f"data: {json.dumps(obj)}\n\n"
+
+        def gen():
+            try:
+                stream = client.chat.completions.create(
+                    model=model, messages=convo, max_tokens=max_tok,
+                    temperature=temperature, extra_body=extra, stream=True)
+            except Exception:  # noqa: BLE001
+                yield _sse({"event": "error",
+                            "message": f"ParaClient {version} backend not available"})
+                return
+            for chunk in stream:
+                try:
+                    delta = chunk.choices[0].delta.content or ""
+                except (AttributeError, IndexError):
+                    delta = ""
+                if delta:
+                    yield _sse({"event": "delta", "content": delta})
+            yield _sse({"event": "done", **meta})
+
+        return gen()
 
     def lookup(authorization: str | None):
         """Validate the bearer key only (no rate-limit consumption).
@@ -906,11 +951,30 @@ def build_app(tutor_url: str, tutor_key: str):
         max_tok = max(1, min(int(body.get("max_tokens", 400) or 400),
                              max_context_for(rec)))
         extra = ({"priority": priority_for(rec)} if version == "v4" else None)
+        temperature = body.get("temperature", 0.3)
+
+        # ---- Opt-in streaming (INTERNAL/dev only) ---------------------------
+        # Default OFF. Streaming skips per-token output moderation, so it is
+        # restricted to the `internal` audience (dev TUI); `consumer`/`edu`
+        # always fall through to the blocking path below, where screen_output
+        # runs once on the complete answer. Per-segment moderated streaming was
+        # implemented and measured but is not viable on this CPU box: the guard
+        # costs 10-20s/call and false-positives on partial sentences, making it
+        # slower and less correct than the single-shot blocking moderation.
+        if bool(body.get("stream")) and rec.get("audience") == "internal":
+            meta = {"version": version, "model": model,
+                    "product": product_for(rec),
+                    "model_name": display_version(rec, version)}
+            return StreamingResponse(
+                _raw_chat_stream(client, model, convo, max_tok,
+                                 temperature, extra, meta, version),
+                media_type="text/event-stream")
+
         try:
             resp = client.chat.completions.create(
                 model=model, messages=convo,
                 max_tokens=max_tok,
-                temperature=body.get("temperature", 0.3),
+                temperature=temperature,
                 extra_body=extra)
             answer = resp.choices[0].message.content
         except Exception:
