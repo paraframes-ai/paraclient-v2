@@ -12,3 +12,4 @@ bitsandbytes>=0.44
 # Serving + eval:
 vllm>=0.6.3
 openai>=1.40
+google-auth>=2.56.2  # server-side Google Sign-In ID-token verification (/v1/auth/google)

@@ -353,6 +353,58 @@ with accounts._connect() as con:
                        (uid,)).fetchone()["c"]
 check("deleting an account erases its sessions", left == 0, f"{left} left")
 
+print("\n=== Google OAuth provisioning + team derivation ===")
+# team is the paraframes.org subdomain; None for everyone else.
+check("subdomain email -> that team",
+      accounts.paraframes_team("alice@research.paraframes.org") == "research")
+check("bare paraframes -> 'paraframes' team",
+      accounts.paraframes_team("bob@paraframes.org") == "paraframes")
+check("multi-label subdomain kept whole",
+      accounts.paraframes_team("c@x.y.paraframes.org") == "x.y")
+check("non-paraframes email -> no team (consumer)",
+      accounts.paraframes_team("dave@gmail.com") is None)
+check("lookalike domain is NOT paraframes",
+      accounts.paraframes_team("e@notparaframes.org") is None
+      and accounts.paraframes_team("f@paraframes.org.evil.com") is None)
+
+dev = accounts.provision_oauth("alice@research.paraframes.org", provider="google",
+                               tier="dev", team="research", audience="internal")
+check("dev email provisions a dev account", dev["tier"] == "dev", str(dev))
+check("dev account joins its subdomain team", dev["team"] == "research")
+check("dev account is internal audience", dev["audience"] == "internal")
+check("provisioning returns a usable api_key", dev["api_key"].startswith("pk-"))
+rec = accounts.record_for_key(dev["api_key"])
+check("record_for_key surfaces the team", rec and rec.get("team") == "research", str(rec))
+check("record_for_key resolves tier/audience",
+      rec and rec["tier"] == "dev" and rec["audience"] == "internal")
+
+# Idempotent: signing in again returns the SAME user, a fresh key, still dev+team.
+dev2 = accounts.provision_oauth("alice@research.paraframes.org", provider="google",
+                                tier="dev", team="research", audience="internal")
+check("re-signin is idempotent (same user)", dev2["user"] == dev["user"])
+check("re-signin mints a fresh key", dev2["api_key"] != dev["api_key"])
+
+# OAuth accounts are passwordless -> password login can never succeed for them.
+try:
+    accounts.login("alice@research.paraframes.org", "any password at all")
+    check("oauth account rejects password login", False, "login unexpectedly ok")
+except accounts.AccountError as e:
+    check("oauth account rejects password login", e.status == 401, str(e.status))
+
+# Consumer Google sign-in: free tier, no team, but COPPA age gate required first.
+try:
+    accounts.provision_oauth("newperson@gmail.com", provider="google",
+                             tier="free", audience="consumer", gate_token=None)
+    check("consumer google without age gate is refused", False, "provisioned anyway")
+except accounts.AccountError as e:
+    check("consumer google without age gate is refused", e.status in (403, 400),
+          str(e.status))
+_gt = accounts.age_gate(dob_str(25))["gate_token"]
+con = accounts.provision_oauth("newperson@gmail.com", provider="google",
+                               tier="free", audience="consumer", gate_token=_gt)
+check("consumer google (age-gated) -> free tier", con["tier"] == "free", str(con))
+check("consumer google account has no team", con["team"] is None)
+
 print(f"\n{'='*54}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("  FAILED: " + ", ".join(FAIL))

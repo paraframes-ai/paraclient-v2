@@ -42,6 +42,7 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from content_filter import ContentFilter, Action, HeuristicBackend  # noqa: E402
 from moderation import model_backend, CompositeBackend  # noqa: E402
 import accounts  # noqa: E402  (SQLite account store: age gate, signup, login)
+import google_auth  # noqa: E402  (server-side Google ID-token verification)
 import generate_media as gm  # noqa: E402
 from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
                         repair_sketch, floorplan_issues,
@@ -669,6 +670,7 @@ def build_app(tutor_url: str, tutor_key: str):
         is held ONLY by that server — never sent to browsers."""
         _, rec = lookup(authorization)
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
+                "team": rec.get("team"),
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
                 "tier": tier_of(rec), "allowed_versions": versions_for(rec),
                 "product": product_for(rec),
@@ -746,6 +748,51 @@ def build_app(tutor_url: str, tutor_key: str):
         return JSONResponse({**out,
                              "allowed_versions": versions_for_tier(out["tier"])})
 
+    @app.post("/v1/auth/google")
+    async def auth_google(request: Request):
+        """Google Sign-In. Body: {credential:"<google_id_token>", gate_token?}.
+
+        The ID token is verified server-side (google_auth). Then, by the verified
+        email's domain:
+          * a paraframes.org (sub)domain -> a DEV account in the team named by the
+            subdomain (research.paraframes.org -> team 'research'); audience
+            'internal', so staff get the dev perks. No age gate (staff).
+          * any other verified email -> a FREE consumer account. COPPA still
+            applies, so first-time creation needs a passed age gate: without a
+            gate_token we return 428 so the client runs /v1/auth/age-gate and
+            retries with the token.
+        Returns a one-time api_key, exactly like signup/login."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(400, "expected a JSON body")
+        credential = body.get("credential") or body.get("id_token")
+        try:
+            email = google_auth.verify_email(credential)
+        except google_auth.GoogleAuthError as e:
+            return JSONResponse({"error": e.message}, status_code=e.status)
+
+        team = accounts.paraframes_team(email)
+        try:
+            if team is not None:
+                out = accounts.provision_oauth(
+                    email, provider="google", tier="dev", team=team,
+                    audience="internal", label="google-sso")
+            else:
+                gate_token = body.get("gate_token")
+                if not gate_token:
+                    return JSONResponse(
+                        {"error": "complete the age check before creating an "
+                                  "account", "code": "age_gate_required"},
+                        status_code=428)
+                out = accounts.provision_oauth(
+                    email, provider="google", tier="free", audience="consumer",
+                    gate_token=gate_token, label="google-sso")
+        except accounts.AccountError as e:
+            return _acct_error(e)
+        return JSONResponse({**out, "plan": TIER_LABEL.get(out["tier"], "Free"),
+                             "allowed_versions": versions_for_tier(out["tier"])})
+
     @app.post("/v1/auth/logout")
     async def auth_logout(authorization: str | None = Header(None)):
         """Revoke the presented key (other sessions keep working)."""
@@ -758,7 +805,7 @@ def build_app(tutor_url: str, tutor_key: str):
         acct = accounts.get_account(rec.get("user")) or {}
         return {"user": rec.get("user"), "email": acct.get("email"),
                 "audience": rec.get("audience"), "tier": tier_of(rec),
-                "plan": TIER_LABEL.get(tier_of(rec), "Free"),
+                "team": acct.get("team"), "plan": TIER_LABEL.get(tier_of(rec), "Free"),
                 "status": acct.get("status", "active"),
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
                 "allowed_versions": versions_for(rec),

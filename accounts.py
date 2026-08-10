@@ -123,7 +123,14 @@ def init_db() -> None:
             age_13plus    INTEGER NOT NULL,
             age_checked_at REAL NOT NULL,
             status        TEXT NOT NULL DEFAULT 'active',
-            created_at    REAL NOT NULL
+            created_at    REAL NOT NULL,
+            -- Dev/staff accounts are grouped into a team derived from their
+            -- paraframes.org subdomain (research.paraframes.org -> "research").
+            -- NULL for ordinary consumer accounts.
+            team          TEXT,
+            -- 'password' (email+password signup) or 'google' (OAuth). OAuth
+            -- accounts store an unusable random pw_hash so login() can't match.
+            auth_provider TEXT NOT NULL DEFAULT 'password'
         );
         CREATE TABLE IF NOT EXISTS api_keys (
             key_hash   TEXT PRIMARY KEY,
@@ -165,6 +172,13 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         """)
+        # Migrate older DBs created before the OAuth/team columns existed.
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(accounts)")}
+        if "team" not in cols:
+            con.execute("ALTER TABLE accounts ADD COLUMN team TEXT")
+        if "auth_provider" not in cols:
+            con.execute("ALTER TABLE accounts ADD COLUMN auth_provider "
+                        "TEXT NOT NULL DEFAULT 'password'")
 
 
 # --------------------------------------------------------------------------
@@ -204,6 +218,24 @@ def _normalize_email(email: str) -> str:
     if not _EMAIL_RE.match(e) or len(e) > 254:
         raise AccountError(400, "enter a valid email address")
     return e
+
+
+def paraframes_team(email: str) -> str | None:
+    """Team for a paraframes.org staff email, or None for anyone else.
+
+    The team is the subdomain in front of paraframes.org:
+      alice@research.paraframes.org -> "research"
+      bob@paraframes.org            -> "paraframes"   (bare domain = core team)
+      carol@x.y.paraframes.org      -> "x.y"
+      dave@gmail.com                -> None           (ordinary consumer)
+    A paraframes email is what marks an account as dev/staff (see provision_oauth).
+    """
+    dom = (email or "").strip().lower().rsplit("@", 1)[-1]
+    if dom == "paraframes.org":
+        return "paraframes"
+    if dom.endswith(".paraframes.org"):
+        return dom[: -len(".paraframes.org")]
+    return None
 
 
 def age_from_dob(dob: str) -> int:
@@ -314,6 +346,60 @@ def create_account(email: str, password: str, gate_token: str,
             "tier": tier, "api_key": key}
 
 
+def provision_oauth(email: str, *, provider: str = "google", tier: str,
+                    team: str | None = None, audience: str = "consumer",
+                    gate_token: str | None = None,
+                    label: str = "oauth") -> dict:
+    """Create-or-fetch a PASSWORDLESS account for a verified OAuth email and mint
+    a fresh one-time API key. Idempotent per email.
+
+    Two provisioning shapes, chosen by the caller from the email domain:
+      * Dev/staff (team set, tier 'dev'): upsert tier+team+audience every time, so
+        a paraframes.org staffer always resolves to a dev account in their team,
+        even if a plain account already existed for that address.
+      * Consumer (team None, tier 'free'): on FIRST creation this requires a
+        passed age gate (gate_token), exactly like password signup (COPPA); an
+        existing consumer's tier is left untouched (never silently changed).
+
+    The stored pw_hash is a hash of a random secret, so the account can never be
+    logged into with a password — OAuth is its only credential path."""
+    email = _normalize_email(email)
+    now = time.time()
+    with _connect() as con:
+        row = con.execute(
+            "SELECT user_id,tier,team,audience,status FROM accounts WHERE email=?",
+            (email,)).fetchone()
+        if row:
+            if row["status"] != "active":
+                raise AccountError(403, "this account is suspended")
+            user_id = row["user_id"]
+            if team is not None:            # staff: keep them dev + in their team
+                con.execute(
+                    "UPDATE accounts SET tier=?,team=?,audience=?,auth_provider=? "
+                    "WHERE user_id=?", (tier, team, audience, provider, user_id))
+                final = (tier, team, audience)
+            else:                           # existing consumer: don't clobber tier
+                final = (row["tier"], row["team"], row["audience"])
+        else:
+            if team is None:                # new consumer must clear the age gate
+                _consume_gate_token(gate_token)
+            user_id = "u_" + secrets.token_hex(8)
+            pw_hash, salt = _hash_password(secrets.token_urlsafe(32))  # unusable
+            try:
+                con.execute(
+                    "INSERT INTO accounts(user_id,email,pw_hash,pw_salt,audience,"
+                    "tier,rpm,age_13plus,age_checked_at,status,created_at,team,"
+                    "auth_provider) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (user_id, email, pw_hash, salt, audience, tier, 0, 1, now,
+                     "active", now, team, provider))
+            except sqlite3.IntegrityError:
+                raise AccountError(409, "could not provision that account")
+            final = (tier, team, audience)
+    key = _issue_key(user_id, label)
+    return {"user": user_id, "email": email, "audience": final[2],
+            "tier": final[0], "team": final[1], "api_key": key}
+
+
 def _issue_key(user_id: str, label: str = "") -> str:
     """Mint an API key, store only its hash, return the plaintext once."""
     key = "pk-" + secrets.token_urlsafe(32)
@@ -389,7 +475,7 @@ def record_for_key(key: str) -> dict | None:
     kh = _hash_key(key)
     with _connect() as con:
         row = con.execute(
-            "SELECT a.user_id,a.audience,a.tier,a.rpm,a.status FROM api_keys k "
+            "SELECT a.user_id,a.audience,a.tier,a.rpm,a.status,a.team FROM api_keys k "
             "JOIN accounts a ON a.user_id=k.user_id WHERE k.key_hash=?",
             (kh,)).fetchone()
         if not row:
@@ -399,7 +485,8 @@ def record_for_key(key: str) -> dict | None:
         con.execute("UPDATE api_keys SET last_used=? WHERE key_hash=?",
                     (time.time(), kh))
     return {"user": row["user_id"], "audience": row["audience"],
-            "tier": row["tier"], "rpm": row["rpm"], "source": "accounts_db"}
+            "tier": row["tier"], "rpm": row["rpm"], "team": row["team"],
+            "source": "accounts_db"}
 
 
 # --------------------------------------------------------------------------
@@ -510,7 +597,8 @@ def get_account(user_id: str) -> dict | None:
     with _connect() as con:
         row = con.execute(
             "SELECT user_id,email,audience,tier,rpm,status,created_at,"
-            "age_13plus FROM accounts WHERE user_id=?", (user_id,)).fetchone()
+            "age_13plus,team,auth_provider FROM accounts WHERE user_id=?",
+            (user_id,)).fetchone()
     return dict(row) if row else None
 
 
