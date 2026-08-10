@@ -10,5 +10,5 @@ MODEL=models/qwen2.5-7b-gguf/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf
 exec llama.cpp/build/bin/llama-server \
   -m "$MODEL" \
   --host 127.0.0.1 --port 8002 \
-  -c 8192 -t 6 \
+  -c 8192 -t 4 \
   --alias paraclient-v2
