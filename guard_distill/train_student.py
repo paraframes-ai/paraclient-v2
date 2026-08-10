@@ -60,6 +60,10 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--val-frac", type=float, default=0.1)
+    ap.add_argument("--pos-weight-cap", type=float, default=15.0,
+                    help="cap on per-class BCE pos_weight (neg/pos). Boosts recall "
+                         "on rare harms (e.g. sexual) -- the safety-critical metric. "
+                         "0 disables weighting.")
     args = ap.parse_args()
 
     import numpy as np
@@ -77,6 +81,19 @@ def main():
     print(f"[train_student] {len(rows)} labeled rows | labels={LABELS}")
     split = max(1, int(len(rows) * args.val_frac))
     val, train = rows[:split], rows[split:]
+
+    # Per-class BCE pos_weight = neg/pos (capped). Rare harms (sexual) otherwise
+    # get drowned by the majority-negative loss and under-recalled — unacceptable
+    # for a safety guard, where a missed positive is the worst error.
+    pos_weight = None
+    if args.pos_weight_cap > 0:
+        arr = np.array([r["labels"] for r in train])
+        pos = (arr >= 0.5).sum(axis=0).astype(float)
+        neg = len(arr) - pos
+        pw = np.clip(np.divide(neg, np.maximum(pos, 1.0)), 1.0, args.pos_weight_cap)
+        pos_weight = torch.tensor(pw, dtype=torch.float)
+        print(f"[train_student] pos_weight (neg/pos, cap {args.pos_weight_cap}): "
+              + ", ".join(f"{l}={w:.1f}" for l, w in zip(LABELS, pw)))
 
     tok = AutoTokenizer.from_pretrained(args.base)
 
@@ -118,11 +135,30 @@ def main():
         load_best_model_at_end=True, metric_for_best_model="macro_recall",
         greater_is_better=True, logging_steps=25, report_to=[])
 
-    trainer = Trainer(model=model, args=targs,
-                      train_dataset=ds_train, eval_dataset=ds_val,
-                      tokenizer=tok,
-                      data_collator=DataCollatorWithPadding(tok),
-                      compute_metrics=compute_metrics)
+    class WeightedTrainer(Trainer):
+        """Trainer with class-weighted BCE (pos_weight) for imbalanced multi-label
+        safety. num_items_in_batch is accepted for newer-transformers compat."""
+        def compute_loss(self, model, inputs, return_outputs=False,
+                         num_items_in_batch=None):
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+            pw = (pos_weight.to(outputs.logits.device)
+                  if pos_weight is not None else None)
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                outputs.logits, labels.float(), pos_weight=pw)
+            return (loss, outputs) if return_outputs else loss
+
+    # transformers >=4.46 renamed Trainer's `tokenizer=` to `processing_class=`
+    # (and newer versions removed the old name). Pick whichever this env accepts.
+    import inspect
+    tok_kw = ("processing_class"
+              if "processing_class" in inspect.signature(Trainer.__init__).parameters
+              else "tokenizer")
+    trainer = WeightedTrainer(model=model, args=targs,
+                              train_dataset=ds_train, eval_dataset=ds_val,
+                              data_collator=DataCollatorWithPadding(tok),
+                              compute_metrics=compute_metrics,
+                              **{tok_kw: tok})
     trainer.train()
     trainer.save_model(args.out)
     tok.save_pretrained(args.out)
