@@ -41,7 +41,7 @@ THE AGE GATE IS THE HINGE (compliance/01 §1-§2)
   self-serve signup. `test_accounts.py` asserts this as an invariant.
 
 TIERS (interim, pre-billing)
-  Plans are free -> plus -> premiere, plus an internal dev tier; the gateway
+  Plans are free -> plus -> premier, plus an internal dev tier; the gateway
   owns the per-tier model access and Knowledge Library quotas. There is no
   billing integration yet, so tier is decided by DEPLOYMENT ENVIRONMENT rather
   than by a plan the user bought:
@@ -183,7 +183,7 @@ def default_tier() -> str:
     self-serve signup cannot queue work on the single L4.
 
     When billing lands, this function stays as it is; the promotion path is a
-    separate call that sets tier to plus/premiere on a successful charge."""
+    separate call that sets tier to plus/premier on a successful charge."""
     env = os.environ.get("PARACLIENT_ENV", "dev").strip().lower()
     return "free" if env in ("prod", "production") else "dev"
 

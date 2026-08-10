@@ -84,7 +84,7 @@ Right to erasure. Empty body = delete self. **Require an explicit typed confirma
 
 ## 2. Plans
 
-| | Free | Plus | Premiere | Dev |
+| | Free | Plus | Premier | Dev |
 |---|---|---|---|---|
 | Library storage | 128 GB | 1 TB | 2 TB | 4 TB |
 | Requests / month | 500 | 1,000 | 10,000 | unlimited |
@@ -149,11 +149,11 @@ POST /v1/spreadsheet  {mode: generate|tutor} — formula-gated
 POST /v1/civics       static adapter + live .gov-sourced answers
 POST /v1/notes        handwriting / math transcription (image). Optional
                       {backend: "paraclient"|"gemini"|"claude"} — default
-                      paraclient (on-prem). gemini/claude are Premiere/Dev only
+                      paraclient (on-prem). gemini/claude are Premier/Dev only
                       and never available to edu; response carries `on_prem`.
-POST /v1/gemini       third-party (Vertex) — Premiere/Dev only (NOT Plus)
-POST /v1/claude-free  Sonnet (Vertex)      — Premiere/Dev only (NOT Plus)
-POST /v1/claude-paid  Opus (Vertex)        — Premiere/Dev only (NOT Plus)
+POST /v1/gemini       third-party (Vertex) — Premier/Dev only (NOT Plus)
+POST /v1/claude-free  Sonnet (Vertex)      — Premier/Dev only (NOT Plus)
+POST /v1/claude-paid  Opus (Vertex)        — Premier/Dev only (NOT Plus)
 POST /v1/embed        embeddings for the Knowledge Library
 GET  /healthz
 ```

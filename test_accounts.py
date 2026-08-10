@@ -175,26 +175,26 @@ check("delete reports keys removed", isinstance(n, int) and n >= 0)
 print("\n=== tiers: model access, storage quotas, rate limiting ===")
 import auth_gateway as gw  # noqa: E402
 
-check("tiers are free/plus/premiere/dev",
-      gw.TIERS == ("free", "plus", "premiere", "dev"), str(gw.TIERS))
+check("tiers are free/plus/premier/dev",
+      gw.TIERS == ("free", "plus", "premier", "dev"), str(gw.TIERS))
 
 # Storage allowances exactly as specified.
 GB, TB = 1000 ** 3, 1000 ** 4
 for tier, want, label in [("free", 128 * GB, "128 GB"), ("plus", 1 * TB, "1 TB"),
-                          ("premiere", 2 * TB, "2 TB"), ("dev", 4 * TB, "4 TB")]:
+                          ("premier", 2 * TB, "2 TB"), ("dev", 4 * TB, "4 TB")]:
     got = gw.storage_bytes_for({"tier": tier})
     check(f"{tier} library storage = {label}", got == want,
           f"got {gw.human_bytes(got)}")
 
 # Rate limiting: everything IS capped except dev.
-for tier, want in [("free", 20), ("plus", 60), ("premiere", 120), ("paid", 60)]:
+for tier, want in [("free", 20), ("plus", 60), ("premier", 120), ("paid", 60)]:
     got = gw.rpm_for({"tier": tier})
     check(f"{tier} IS rate limited at {want}/min", got == want, f"got {got}")
 check("dev is EXEMPT from rate limiting", gw.rpm_for({"tier": "dev"}) is None)
 check("an explicit per-key rpm overrides the tier default",
       gw.rpm_for({"tier": "free", "rpm": 999}) == 999)
 check("rpm=0 means 'use the tier default'",
-      gw.rpm_for({"tier": "premiere", "rpm": 0}) == 120)
+      gw.rpm_for({"tier": "premier", "rpm": 0}) == 120)
 check("an unknown tier still gets capped",
       gw.rpm_for({"tier": "bogus"}) == gw.DEFAULT_RPM)
 
@@ -207,7 +207,7 @@ check("free key is blocked past its cap in a burst", _blocked == 30, f"{_blocked
 
 # Model access: free is CPU-only; every paid tier reaches v4 (GPU).
 check("free cannot use v4", "v4" not in gw.versions_for_tier("free"))
-for tier in ("plus", "premiere", "dev"):
+for tier in ("plus", "premier", "dev"):
     check(f"{tier} can use v4", "v4" in gw.versions_for_tier(tier))
 check("free defaults to v2", gw.DEFAULT_VERSION_BY_TIER["free"] == "v2")
 
@@ -246,13 +246,13 @@ check("edu version list maps in order",
 check("served model ids are untouched by branding",
       gw.model_for("socratic", "math") == "ParaFrames/ParaClient-math-v2.2")
 
-print("\n=== monthly usage quotas (free 1x, plus 2x, premiere 20x) ===")
+print("\n=== monthly usage quotas (free 1x, plus 2x, premier 20x) ===")
 qf = gw.monthly_quota_for({"tier": "free"})
 qp = gw.monthly_quota_for({"tier": "plus"})
-qpr = gw.monthly_quota_for({"tier": "premiere"})
+qpr = gw.monthly_quota_for({"tier": "premier"})
 check("plus is exactly 2x free", qp == 2 * qf, f"{qp} vs {qf}")
-check("premiere is exactly 10x plus", qpr == 10 * qp, f"{qpr} vs {qp}")
-check("premiere is exactly 20x free", qpr == 20 * qf, f"{qpr} vs {qf}")
+check("premier is exactly 10x plus", qpr == 10 * qp, f"{qpr} vs {qp}")
+check("premier is exactly 20x free", qpr == 20 * qf, f"{qpr} vs {qf}")
 check("dev is exempt from the usage quota",
       gw.monthly_quota_for({"tier": "dev"}) is None)
 check("legacy 'paid' gets the Plus quota",
@@ -286,8 +286,8 @@ with accounts._connect() as con:
                        (m["user"],)).fetchone()["c"]
 check("deleting an account erases its usage rows", left == 0, f"{left} left")
 
-print("\n=== external models (Gemini/Claude) are Premiere+Dev only ===")
-check("premiere can use external models", gw.can_use_external({"tier": "premiere"}))
+print("\n=== external models (Gemini/Claude) are Premier+Dev only ===")
+check("premier can use external models", gw.can_use_external({"tier": "premier"}))
 check("dev can use external models", gw.can_use_external({"tier": "dev"}))
 check("plus CANNOT use external models", not gw.can_use_external({"tier": "plus"}))
 check("legacy 'paid' (=Plus) CANNOT use external models",
@@ -297,8 +297,8 @@ check("free CANNOT use external models", not gw.can_use_external({"tier": "free"
 check("plus reaches the GPU (v4) but not external models",
       "v4" in gw.versions_for_tier("plus") and not gw.can_use_external({"tier": "plus"}))
 
-print("\n=== premiere perks: sessions, context, queue priority ===")
-for tier, want in [("free", 50), ("plus", 100), ("premiere", 1000)]:
+print("\n=== premier perks: sessions, context, queue priority ===")
+for tier, want in [("free", 50), ("plus", 100), ("premier", 1000)]:
     got = gw.max_sessions_for({"tier": tier})
     check(f"{tier} allows {want} concurrent sessions", got == want, f"got {got}")
 check("dev has unlimited sessions",
@@ -306,18 +306,18 @@ check("dev has unlimited sessions",
 check("legacy 'paid' gets the Plus session cap",
       gw.max_sessions_for({"tier": "paid"}) == 100)
 
-# Longer context for premiere.
+# Longer context for premier.
 cf, cp, cpr = (gw.max_context_for({"tier": t})
-               for t in ("free", "plus", "premiere"))
-check("context grows free < plus < premiere", cf < cp < cpr, f"{cf}/{cp}/{cpr}")
-check("premiere gets the server's full 16k window", cpr == 16384, str(cpr))
+               for t in ("free", "plus", "premier"))
+check("context grows free < plus < premier", cf < cp < cpr, f"{cf}/{cp}/{cpr}")
+check("premier gets the server's full 16k window", cpr == 16384, str(cpr))
 
 # Priority: LOWER is handled earlier.
 pf, pp, ppr = (gw.priority_for({"tier": t})
-               for t in ("free", "plus", "premiere"))
-check("premiere outranks plus outranks free in the queue",
-      ppr < pp < pf, f"premiere={ppr} plus={pp} free={pf}")
-check("dev shares premiere's top priority",
+               for t in ("free", "plus", "premier"))
+check("premier outranks plus outranks free in the queue",
+      ppr < pp < pf, f"premier={ppr} plus={pp} free={pf}")
+check("dev shares premier's top priority",
       gw.priority_for({"tier": "dev"}) == ppr)
 
 # Session slots are really enforced and really released.

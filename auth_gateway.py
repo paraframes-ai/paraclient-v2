@@ -111,20 +111,20 @@ def model_for(mode: str, subject: str) -> str:
 # multimodal); v2 (7B) and v3 (14B) are served on CPU (llama.cpp) for the free
 # tier. v4 is premium -> paid/dev only. edu (schools) is treated as a PAID tier.
 # --------------------------------------------------------------------------
-# Plans: free -> plus -> premiere, plus an internal dev tier. "paid" is the
+# Plans: free -> plus -> premier, plus an internal dev tier. "paid" is the
 # ORIGINAL name of the single paid tier and is kept as a working alias for plus
 # so existing keys (gateway_keys.json, and the edu->paid derivation below) keep
 # their access; nothing has to be re-issued.
-TIERS = ("free", "plus", "premiere", "dev")
-TIER_LABEL = {"free": "Free", "plus": "Plus", "premiere": "Premiere",
+TIERS = ("free", "plus", "premier", "dev")
+TIER_LABEL = {"free": "Free", "plus": "Plus", "premier": "Premier",
               "dev": "Dev", "paid": "Plus"}
 # Every tier above free may reach the GPU (v4 / Kalvi 4).
-PAID_TIERS = {"plus", "premiere", "dev", "paid"}
+PAID_TIERS = {"plus", "premier", "dev", "paid"}
 
-# The off-box, third-party models (Gemini / Claude on Vertex) are a Premiere
+# The off-box, third-party models (Gemini / Claude on Vertex) are a Premier
 # perk, NOT a general paid perk: Plus reaches v4 on the GPU but not the external
 # providers. "paid" is the legacy alias of Plus, so it is deliberately excluded.
-EXTERNAL_MODEL_TIERS = {"premiere", "dev"}
+EXTERNAL_MODEL_TIERS = {"premier", "dev"}
 
 
 def can_use_external(rec: dict) -> bool:
@@ -141,7 +141,7 @@ PREFERRED_VERSION_ORDER = ("v4", "v3", "v2")   # best first, for defaulting
 # CPU-only: v4 (GPU/Gemma-4) is gone, so every tier defaults to v2 (the 7B
 # CPU model on llama.cpp). v4 stays in VERSION_ACCESS but only answers if a GPU
 # vLLM is ever running again; on the CPU box a request for it 503s by design.
-DEFAULT_VERSION_BY_TIER = {"free": "v2", "plus": "v2", "premiere": "v2",
+DEFAULT_VERSION_BY_TIER = {"free": "v2", "plus": "v2", "premier": "v2",
                            "paid": "v2", "dev": "v2"}
 VERSION_MODEL = {"v2": "paraclient-v2", "v3": "paraclient-v3"}  # CPU llama.cpp names
 
@@ -152,7 +152,7 @@ _TB = 1000 ** 4
 TIER_STORAGE_BYTES = {
     "free":     128 * _GB,
     "plus":       1 * _TB,
-    "premiere":   2 * _TB,
+    "premier":   2 * _TB,
     "dev":        4 * _TB,
     "paid":       1 * _TB,          # legacy alias of plus
 }
@@ -164,7 +164,7 @@ TIER_STORAGE_BYTES = {
 # approaches these numbers. They exist to stop a runaway loop or an abusive
 # signup from monopolising the single GPU, not to shape normal use.
 UNLIMITED_TIERS = {"dev"}
-TIER_RPM = {"free": 20, "plus": 60, "premiere": 120, "paid": 60}
+TIER_RPM = {"free": 20, "plus": 60, "premier": 120, "paid": 60}
 DEFAULT_RPM = 20
 
 
@@ -172,7 +172,7 @@ DEFAULT_RPM = 20
 # limit stops a burst; this caps what a plan is worth over a month.
 #   Free      1x   (baseline)
 #   Plus      2x free
-#   Premiere  10x plus  = 20x free
+#   Premier  10x plus  = 20x free
 #   Dev       exempt
 # Metered in REQUESTS (a tutoring turn is the unit a user understands). The
 # meter also accumulates tokens for capacity planning; only requests are
@@ -181,25 +181,25 @@ FREE_MONTHLY_REQUESTS = 500
 TIER_MONTHLY_REQUESTS = {
     "free":     FREE_MONTHLY_REQUESTS,           #    500
     "plus":     FREE_MONTHLY_REQUESTS * 2,       #  1,000
-    "premiere": FREE_MONTHLY_REQUESTS * 20,      # 10,000  (= 10x plus)
+    "premier": FREE_MONTHLY_REQUESTS * 20,      # 10,000  (= 10x plus)
     "paid":     FREE_MONTHLY_REQUESTS * 2,       # legacy alias of plus
 }
 
 
 # Concurrent active sessions per user. A session is claimed via
 # /v1/session/open and released on close or after SESSION_IDLE_TTL.
-TIER_MAX_SESSIONS = {"free": 50, "plus": 100, "premiere": 1000, "paid": 100}
+TIER_MAX_SESSIONS = {"free": 50, "plus": 100, "premier": 1000, "paid": 100}
 
 # Context window per tier. The v4 server is started with --max-model-len 16384,
-# so premiere gets the full window and lower tiers are clamped below it.
-TIER_MAX_CONTEXT = {"free": 4096, "plus": 8192, "premiere": 16384,
+# so premier gets the full window and lower tiers are clamped below it.
+TIER_MAX_CONTEXT = {"free": 4096, "plus": 8192, "premier": 16384,
                     "paid": 8192, "dev": 16384}
 
 # vLLM scheduling priority — LOWER IS HANDLED EARLIER. Only has an effect when
 # the server runs with --scheduling-policy priority (see serve_g4_fp8.sh);
 # under the default fcfs policy the field is accepted and ignored, so this is
 # safe to send either way.
-TIER_PRIORITY = {"premiere": 0, "dev": 0, "plus": 5, "paid": 5, "free": 10}
+TIER_PRIORITY = {"premier": 0, "dev": 0, "plus": 5, "paid": 5, "free": 10}
 
 
 def max_sessions_for(rec: dict) -> int | None:
@@ -214,7 +214,7 @@ def max_context_for(rec: dict) -> int:
 
 
 def priority_for(rec: dict) -> int:
-    """Queue priority for this key. Premiere (and dev) jump ahead of plus,
+    """Queue priority for this key. Premier (and dev) jump ahead of plus,
     which jumps ahead of free, whenever requests contend for the single GPU."""
     return TIER_PRIORITY.get(tier_of(rec), TIER_PRIORITY["free"])
 
@@ -948,7 +948,7 @@ def build_app(tutor_url: str, tutor_key: str):
             client, model = tutor, model_for(mode, subject)
         else:
             client, model = version_client[version], VERSION_MODEL[version]
-        # Tier perks: premiere gets the full context window and jumps the GPU
+        # Tier perks: premier gets the full context window and jumps the GPU
         # queue. `priority` is a vLLM extra -- only send it to the v4 (vLLM)
         # backend; the CPU llama.cpp servers would reject an unknown field.
         max_tok = max(1, min(int(body.get("max_tokens", 400) or 400),
@@ -1254,7 +1254,7 @@ def build_app(tutor_url: str, tutor_key: str):
         # POLICY: note transcription is the ONE external capability open to
         # everyone -- every tier gets it, because it's the core scan feature and
         # there is no on-prem VLM in the CPU-only world. The general external
-        # models (/v1/gemini, /v1/claude-*) stay Premiere/Dev-only; notes is the
+        # models (/v1/gemini, /v1/claude-*) stay Premier/Dev-only; notes is the
         # deliberate exception.
         #
         # The ONE hard exclusion is edu: a child's handwriting must never leave
@@ -1329,7 +1329,7 @@ def build_app(tutor_url: str, tutor_key: str):
                      "(student data must stay on-prem; use the local tutor)")
         if not can_use_external(rec):
             raise HTTPException(
-                402, "external models (Gemini) are a Premiere feature "
+                402, "external models (Gemini) are a Premier feature "
                      f"(your plan: {TIER_LABEL.get(tier_of(rec), 'Free')})")
         body = await request.json()
         messages = body.get("messages")
@@ -1377,7 +1377,7 @@ def build_app(tutor_url: str, tutor_key: str):
                      "(student data must stay on-prem; use the local tutor)")
         if not can_use_external(rec):
             raise HTTPException(
-                402, "external Claude models are a Premiere feature "
+                402, "external Claude models are a Premier feature "
                      f"(your plan: {TIER_LABEL.get(tier_of(rec), 'Free')})")
         body = await request.json()
         messages = body.get("messages")
