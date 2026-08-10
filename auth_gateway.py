@@ -136,8 +136,11 @@ VERSION_ACCESS = {
 PREFERRED_VERSION_ORDER = ("v4", "v3", "v2")   # best first, for defaulting
 # Per-tier default: paid tiers get v4 (GPU); free defaults to v2 (7B, responsive
 # on CPU) rather than v3 (14B, ~2-4 tok/s) — v3 is opt-in for free users.
-DEFAULT_VERSION_BY_TIER = {"free": "v2", "plus": "v4", "premiere": "v4",
-                           "paid": "v4", "dev": "v4"}
+# CPU-only: v4 (GPU/Gemma-4) is gone, so every tier defaults to v2 (the 7B
+# CPU model on llama.cpp). v4 stays in VERSION_ACCESS but only answers if a GPU
+# vLLM is ever running again; on the CPU box a request for it 503s by design.
+DEFAULT_VERSION_BY_TIER = {"free": "v2", "plus": "v2", "premiere": "v2",
+                           "paid": "v2", "dev": "v2"}
 VERSION_MODEL = {"v2": "paraclient-v2", "v3": "paraclient-v3"}  # CPU llama.cpp names
 
 # Knowledge Library (per-user RAG) storage allowance per tier. Decimal units,
