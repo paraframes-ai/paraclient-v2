@@ -42,7 +42,6 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from content_filter import ContentFilter, Action, HeuristicBackend  # noqa: E402
 from moderation import ShieldGemmaBackend, CompositeBackend  # noqa: E402
 import accounts  # noqa: E402  (SQLite account store: age gate, signup, login)
-from vertex_shim import client_for as vertex_client_for  # noqa: E402
 import generate_media as gm  # noqa: E402
 from cad_schema import (sys_for, clean_sketch, clean_solid,  # noqa: E402
                         repair_sketch, floorplan_issues)
@@ -217,28 +216,11 @@ def priority_for(rec: dict) -> int:
     return TIER_PRIORITY.get(tier_of(rec), TIER_PRIORITY["free"])
 
 
-# Doc/slide generation (/v1/generate) runs on Vertex, with the MODEL scaling by
-# plan: everyone can generate, but you pay for a better author.
-#   free (and base)   -> cheapest Gemini
-#   plus (paid alias) -> mid Gemini
-#   premiere / dev    -> Claude Opus on Vertex
-# Edu never reaches this route (non-socratic), so off-box generation is fine.
-GEN_MODEL_FREE = os.environ.get("GEN_MODEL_FREE", "gemini-2.5-flash-lite")
-GEN_MODEL_PLUS = os.environ.get("GEN_MODEL_PLUS", "gemini-2.5-flash")
-GEN_MODEL_PREMIERE = os.environ.get("GEN_MODEL_PREMIERE", CLAUDE_PAID_MODEL)
-
-
-def generate_backend_model(rec: dict) -> tuple[str, str]:
-    """(provider, model) for /v1/generate, chosen by plan. provider is
-    'gemini' or 'claude' (both on Vertex)."""
-    tier = tier_of(rec)
-    if tier in ("premiere", "dev"):
-        return ("claude", GEN_MODEL_PREMIERE)
-    if tier in ("plus", "paid"):          # 'paid' is the legacy alias of Plus
-        return ("gemini", GEN_MODEL_PLUS)
-    return ("gemini", GEN_MODEL_FREE)
-
-
+# NOTE: /v1/generate deliberately runs ON-BOX (the Munivar model), NOT Vertex —
+# see the route. The earlier Vertex tiering was removed to honour the
+# sustainability commitment: the efficient local model authors docs/slides, and
+# web search/fetch stay on-box. Vertex remains only for /v1/gemini, /v1/claude-*
+# and note-vision, which have no on-box replacement yet.
 def monthly_quota_for(rec: dict) -> int | None:
     """Requests-per-month allowance, or None if the tier is exempt."""
     tier = tier_of(rec)
@@ -930,13 +912,20 @@ def build_app(tutor_url: str, tutor_key: str):
         din = filt.screen_input(prompt)
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
-        # Docs/slides now author on Vertex (off the local GPU), model by plan:
-        # cheapest Gemini (free) -> mid Gemini (Plus) -> Claude Opus (Premiere/Dev).
-        gen_provider, gen_model = generate_backend_model(rec)
-        gen_client = vertex_client_for(gen_provider)
+        # Docs/slides author ON-BOX, on the Munivar model — NOT Vertex. This is
+        # the sustainability commitment: the efficient local model does the
+        # work, web search/fetch run on-box (DuckDuckGo + httpx), so the whole
+        # loop stays on-prem and off the frontier.
+        #   web=false -> single-pass, SCHEMA-GUIDED (the grammar keystone):
+        #                the decoder is constrained to the doc/slide schema so a
+        #                small model can't emit malformed structure.
+        #   web=true  -> the agentic search/fetch loop, also on the local model.
+        # `tutor` now points at the CPU model server; it ignores the model name.
+        gen_client = tutor
+        gen_model = VERSION_MODEL.get("v2", "paraclient-v2")
         try:
             data = (gm.generate_agentic(gen_client, gen_model, kind, prompt) if web
-                    else gm.generate(gen_client, gen_model, kind, prompt))
+                    else gm.generate_guided(gen_client, gen_model, kind, prompt))
             name, theme = gm.pick_theme(data, body.get("theme"))
             ext = "pptx" if kind == "slides" else "docx"
             out = Path("out") / f"gen-{int(time.time()*1000)}.{ext}"
@@ -949,7 +938,8 @@ def build_app(tutor_url: str, tutor_key: str):
                     else "wordprocessingml.document"))
         return JSONResponse({"kind": kind, "theme": name, "filename": out.name,
                              "content_type": ctype, "file_base64": b,
-                             "authored_by": gen_model, "provider": gen_provider})
+                             "authored_by": gen_model, "provider": "paraclient (on-prem)",
+                             "on_prem": True})
 
     def _cad_route(mode: str, rec: dict, body: dict):
         # Non-socratic capability -> consumer/internal only (same rule as generate)
