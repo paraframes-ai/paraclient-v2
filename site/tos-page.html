@@ -1,0 +1,292 @@
+<style>
+  :root{
+    --bg:#FAF8F3; --surface:#FFFFFF;
+    --ink:#201B14; --muted:#635C50; --faint:#948C7D;
+    --accent:#9C5A16; --accent-soft:#B87334;
+    --rule:#E8E2D6; --rule-soft:#F0EBE0;
+    --font-serif:Georgia,"Iowan Old Style","Palatino Linotype",Palatino,"Times New Roman",serif;
+    --font-sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#131009; --surface:#1B1710;
+      --ink:#ECE6DA; --muted:#A9A192; --faint:#6F6858;
+      --accent:#E6A552; --accent-soft:#D8934A;
+      --rule:#2A2418; --rule-soft:#221E14;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#131009; --surface:#1B1710;
+    --ink:#ECE6DA; --muted:#A9A192; --faint:#6F6858;
+    --accent:#E6A552; --accent-soft:#D8934A;
+    --rule:#2A2418; --rule-soft:#221E14;
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--font-serif);
+    font-size:18px; line-height:1.72;
+    -webkit-font-smoothing:antialiased;
+  }
+  .doc{max-width:730px; margin:0 auto; padding:72px 28px 96px;}
+
+  .eyebrow{
+    font-family:var(--font-sans); font-size:.74rem; font-weight:600;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--accent);
+    margin:0 0 14px;
+  }
+  h1{
+    font-size:2.5rem; line-height:1.1; font-weight:600; margin:0;
+    letter-spacing:-.01em; text-wrap:balance;
+  }
+  .meta{
+    font-family:var(--font-sans); font-size:.86rem; color:var(--muted);
+    margin:18px 0 0; padding-bottom:26px; border-bottom:1px solid var(--rule);
+    display:flex; flex-wrap:wrap; gap:6px 20px;
+  }
+  .meta a{color:var(--accent); text-decoration:none;}
+  .meta a:hover{text-decoration:underline;}
+
+  .lede{font-size:1.12rem; color:var(--muted); margin:34px 0 6px; max-width:64ch;}
+
+  .index{
+    margin:34px 0 12px; padding:22px 24px;
+    background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+  }
+  .index h2{
+    font-family:var(--font-sans); font-size:.72rem; font-weight:700;
+    letter-spacing:.14em; text-transform:uppercase; color:var(--faint);
+    margin:0 0 12px;
+  }
+  .index ol{
+    margin:0; padding:0; list-style:none;
+    display:grid; grid-template-columns:repeat(2,1fr); gap:6px 26px;
+    font-family:var(--font-sans); font-size:.92rem;
+  }
+  @media (max-width:540px){ .index ol{grid-template-columns:1fr;} }
+  .index a{color:var(--ink); text-decoration:none; display:flex; gap:12px; padding:3px 0;}
+  .index a:hover{color:var(--accent);}
+  .index .n{color:var(--accent-soft); font-variant-numeric:tabular-nums; min-width:1.4em;}
+
+  section{margin-top:52px; scroll-margin-top:24px;}
+  section > h2{
+    font-size:1.5rem; font-weight:600; line-height:1.25; margin:0 0 14px;
+    padding-top:20px; border-top:1px solid var(--rule-soft);
+    letter-spacing:-.01em; text-wrap:balance;
+  }
+  p{margin:0 0 16px; max-width:66ch;}
+  ul{margin:0 0 16px; padding-left:1.15em; max-width:66ch;}
+  li{margin:0 0 9px;}
+  li::marker{color:var(--accent-soft);}
+  strong{font-weight:700; color:var(--ink);}
+  a.inline{color:var(--accent); text-decoration:none; border-bottom:1px solid var(--rule);}
+  a.inline:hover{border-color:var(--accent);}
+
+  .callout{
+    margin:20px 0; padding:16px 20px; border-radius:10px;
+    background:var(--rule-soft); border-left:3px solid var(--accent);
+    font-size:.98rem; color:var(--ink);
+  }
+  .callout p{margin:0; max-width:none;}
+
+  footer{
+    margin-top:64px; padding-top:26px; border-top:1px solid var(--rule);
+    font-family:var(--font-sans); font-size:.86rem; color:var(--muted);
+    display:flex; flex-direction:column; gap:6px;
+  }
+  footer a{color:var(--accent); text-decoration:none;}
+  footer a:hover{text-decoration:underline;}
+  footer .fine{color:var(--faint); font-size:.8rem; margin-top:8px;}
+
+  a:focus-visible, .index a:focus-visible{
+    outline:2px solid var(--accent); outline-offset:3px; border-radius:3px;
+  }
+</style>
+
+<article class="doc">
+  <p class="eyebrow">ParaFrames</p>
+  <h1>Terms of Service</h1>
+  <p class="meta">
+    <span>Effective August&nbsp;10,&nbsp;2026</span>
+    <span>Contact: <a href="mailto:support@paraframes.org">support@paraframes.org</a></span>
+  </p>
+
+  <p class="lede">
+    These terms are the agreement between you and ParaFrames for use of our
+    tutoring and learning tools. Please read them; by using ParaFrames you accept
+    them.
+  </p>
+
+  <nav class="index" aria-label="Sections">
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#accept"><span class="n">1</span><span>Acceptance</span></a></li>
+      <li><a href="#who"><span class="n">2</span><span>Who can use ParaFrames</span></a></li>
+      <li><a href="#account"><span class="n">3</span><span>Your account</span></a></li>
+      <li><a href="#use"><span class="n">4</span><span>Acceptable use</span></a></li>
+      <li><a href="#content"><span class="n">5</span><span>Your content</span></a></li>
+      <li><a href="#ai"><span class="n">6</span><span>AI-generated output</span></a></li>
+      <li><a href="#ip"><span class="n">7</span><span>Our intellectual property</span></a></li>
+      <li><a href="#third"><span class="n">8</span><span>Third-party services</span></a></li>
+      <li><a href="#plans"><span class="n">9</span><span>Plans &amp; billing</span></a></li>
+      <li><a href="#term"><span class="n">10</span><span>Suspension &amp; termination</span></a></li>
+      <li><a href="#disclaimer"><span class="n">11</span><span>Disclaimers</span></a></li>
+      <li><a href="#liability"><span class="n">12</span><span>Limitation of liability</span></a></li>
+      <li><a href="#law"><span class="n">13</span><span>Governing law</span></a></li>
+      <li><a href="#changes"><span class="n">14</span><span>Changes &amp; contact</span></a></li>
+    </ol>
+  </nav>
+
+  <section id="accept">
+    <h2>1. Acceptance of these terms</h2>
+    <p>By creating an account or using ParaFrames, you agree to these Terms of
+      Service and to our
+      <a class="inline" href="https://privacy.paraframes.org">Privacy Policy</a>.
+      If you do not agree, do not use the service. If you use ParaFrames on behalf
+      of a school or organization, you represent that you are authorized to accept
+      these terms for it.</p>
+  </section>
+
+  <section id="who">
+    <h2>2. Who can use ParaFrames</h2>
+    <ul>
+      <li><strong>Consumer users must be 13 or older.</strong> We ask your age at
+        sign-up; if you are under 13 you cannot create a consumer account.</li>
+      <li><strong>Under-13 students use ParaFrames only through a participating
+        school</strong> under a separate agreement with that school. If you are a
+        student, your school’s terms and our agreement with it also apply.</li>
+      <li>If you are between 13 and 17, you may use ParaFrames only with your
+        parent’s or guardian’s permission.</li>
+    </ul>
+  </section>
+
+  <section id="account">
+    <h2>3. Your account</h2>
+    <p>Keep your account information accurate and your credentials secure. You are
+      responsible for activity under your account. Tell us promptly at
+      <a class="inline" href="mailto:support@paraframes.org">support@paraframes.org</a>
+      if you believe your account has been used without your permission. Do not
+      share your account or API keys.</p>
+  </section>
+
+  <section id="use">
+    <h2>4. Acceptable use</h2>
+    <p>You agree not to:</p>
+    <ul>
+      <li>use ParaFrames for anything illegal, harmful, or abusive, or to harass,
+        threaten, or exploit anyone;</li>
+      <li>attempt to generate sexual content involving minors, violent or dangerous
+        instructions, hateful content, or other material our safety policies
+        prohibit, or try to bypass our content-safety systems;</li>
+      <li>use ParaFrames to cheat where prohibited, or to misrepresent AI output as
+        solely your own where that is against the rules that apply to you;</li>
+      <li>reverse-engineer, scrape, overload, or disrupt the service, or access it
+        by automated means except through interfaces we provide;</li>
+      <li>infringe others’ intellectual-property or privacy rights, or upload
+        content you do not have the right to upload.</li>
+    </ul>
+    <p>We use automated content moderation to enforce these rules, especially for
+      minors.</p>
+  </section>
+
+  <section id="content">
+    <h2>5. Your content</h2>
+    <p><strong>You keep ownership of the content you submit</strong> — your
+      messages, uploaded files, and notes. You grant ParaFrames the limited license
+      needed to store, process, and display that content in order to provide the
+      features you request (for example, tutoring, transcription, and your
+      Knowledge Library). You are responsible for the content you submit and for
+      having the rights to it.</p>
+    <div class="callout">
+      <p>We do not sell your content, use it for advertising, or use it to train our
+      models. See the
+      <a class="inline" href="https://privacy.paraframes.org">Privacy Policy</a>
+      for how your data is handled.</p>
+    </div>
+  </section>
+
+  <section id="ai">
+    <h2>6. AI-generated output</h2>
+    <p>ParaFrames uses AI to help you learn. <strong>AI output can be wrong or
+      incomplete.</strong> It is an educational aid, not professional advice, and
+      not a substitute for a qualified teacher, or for medical, legal, financial, or
+      other professional judgment. Check important information before you rely on
+      it. You are responsible for how you use what ParaFrames produces.</p>
+  </section>
+
+  <section id="ip">
+    <h2>7. Our intellectual property</h2>
+    <p>ParaFrames, including the service, our models and adapters, software, and
+      branding, is owned by us and protected by law. These terms do not give you any
+      right to our name or logo. We welcome feedback and may use it without
+      obligation to you.</p>
+  </section>
+
+  <section id="third">
+    <h2>8. Third-party services</h2>
+    <p>Some optional, opt-in features are powered by third-party providers (for
+      example, Google Gemini or Anthropic Claude via Google Cloud Vertex AI). When
+      you use those features, the provider’s handling of the request also applies.
+      These features are not available on the student/education path.</p>
+  </section>
+
+  <section id="plans">
+    <h2>9. Plans &amp; billing</h2>
+    <p>ParaFrames offers a free plan and may offer paid plans with additional
+      features or higher limits. If you buy a paid plan, we will show the price and
+      billing terms before you pay, and you can cancel future renewals. Fees are
+      charged through our payment processor. Except where required by law, payments
+      are non-refundable. We may change plan features or pricing on a
+      going-forward basis.</p>
+  </section>
+
+  <section id="term">
+    <h2>10. Suspension &amp; termination</h2>
+    <p>You may stop using ParaFrames and delete your account at any time. We may
+      suspend or end your access if you violate these terms or our safety policies,
+      or where needed to protect users or the service. Sections that by their nature
+      should survive termination — such as content ownership, disclaimers,
+      limitation of liability, and governing law — continue to apply.</p>
+  </section>
+
+  <section id="disclaimer">
+    <h2>11. Disclaimers</h2>
+    <p>ParaFrames is provided “as is” and “as available.” To the fullest extent
+      permitted by law, we disclaim all warranties, express or implied, including
+      merchantability, fitness for a particular purpose, and non-infringement. We do
+      not warrant that the service will be uninterrupted, error-free, or that AI
+      output will be accurate.</p>
+  </section>
+
+  <section id="liability">
+    <h2>12. Limitation of liability</h2>
+    <p>To the fullest extent permitted by law, ParaFrames will not be liable for any
+      indirect, incidental, special, consequential, or punitive damages, or for lost
+      data or profits, arising from your use of the service. Nothing in these terms
+      limits liability that cannot be limited by law.</p>
+  </section>
+
+  <section id="law">
+    <h2>13. Governing law</h2>
+    <p>These terms are governed by the laws of the Commonwealth of Massachusetts,
+      USA, without regard to its conflict-of-laws rules, and you agree to the
+      courts located there for disputes, except where applicable law gives you the
+      right to your local courts.</p>
+  </section>
+
+  <section id="changes">
+    <h2>14. Changes &amp; contact</h2>
+    <p>We may update these terms and will post changes here with a new effective
+      date; significant changes may also be notified in the app. Continuing to use
+      ParaFrames after changes take effect means you accept them. Questions:
+      <a class="inline" href="mailto:support@paraframes.org">support@paraframes.org</a>.</p>
+  </section>
+
+  <footer>
+    <span>ParaFrames · <a href="mailto:support@paraframes.org">support@paraframes.org</a></span>
+    <span>Effective August 10, 2026 · <a href="https://privacy.paraframes.org">Privacy Policy</a></span>
+    <span class="fine">© 2026 ParaFrames. These terms describe current practices and
+      may be updated as the service evolves.</span>
+  </footer>
+</article>
