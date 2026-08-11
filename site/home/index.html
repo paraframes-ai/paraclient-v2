@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="index,follow">
+<title>ParaFrames — an AI tutor that keeps learning on-prem</title>
+<meta name="description" content="ParaFrames is an educational AI tutor for students: Socratic guidance across subjects, safe by design, with student data processed on our own servers.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔶</text></svg>">
+<style>
+  :root{
+    --bg:#FAF8F3; --surface:#FFFFFF;
+    --ink:#201B14; --muted:#5E574C; --faint:#948C7D;
+    --accent:#9C5A16; --accent-soft:#B87334;
+    --rule:#E8E2D6; --rule-soft:#F0EBE0;
+    --font-serif:Georgia,"Iowan Old Style","Palatino Linotype",Palatino,"Times New Roman",serif;
+    --font-sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#131009; --surface:#1B1710;
+      --ink:#ECE6DA; --muted:#A9A192; --faint:#6F6858;
+      --accent:#E6A552; --accent-soft:#D8934A;
+      --rule:#2A2418; --rule-soft:#221E14;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#131009; --surface:#1B1710;
+    --ink:#ECE6DA; --muted:#A9A192; --faint:#6F6858;
+    --accent:#E6A552; --accent-soft:#D8934A;
+    --rule:#2A2418; --rule-soft:#221E14;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--font-serif); font-size:18px; line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:960px; margin:0 auto; padding:0 28px;}
+
+  /* header */
+  header.site{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:26px 0; border-bottom:1px solid var(--rule); flex-wrap:wrap; gap:12px;
+  }
+  .brand{display:flex; align-items:center; gap:11px; font-family:var(--font-sans); font-weight:700; font-size:1.12rem; letter-spacing:-.01em;}
+  .brand .mark{width:22px; height:22px; color:var(--accent);}
+  nav.top{display:flex; gap:22px; font-family:var(--font-sans); font-size:.92rem;}
+  nav.top a{color:var(--muted); text-decoration:none;}
+  nav.top a:hover{color:var(--accent);}
+
+  /* hero */
+  .hero{padding:76px 0 40px; max-width:760px;}
+  .eyebrow{
+    font-family:var(--font-sans); font-size:.76rem; font-weight:600;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin:0 0 20px;
+  }
+  h1{font-size:3.1rem; line-height:1.06; letter-spacing:-.02em; margin:0; font-weight:600; text-wrap:balance;}
+  .hero p.sub{font-size:1.28rem; color:var(--muted); margin:24px 0 0; max-width:60ch; line-height:1.5;}
+  .cta{display:flex; gap:14px; margin-top:34px; flex-wrap:wrap; font-family:var(--font-sans);}
+  .btn{
+    display:inline-flex; align-items:center; padding:12px 22px; border-radius:9px;
+    font-size:.98rem; font-weight:600; text-decoration:none; border:1px solid transparent;
+  }
+  .btn.primary{background:var(--accent); color:#fff;}
+  .btn.primary:hover{background:var(--accent-soft);}
+  .btn.ghost{border-color:var(--rule); color:var(--ink);}
+  .btn.ghost:hover{border-color:var(--accent); color:var(--accent);}
+
+  /* what it is */
+  section{padding:56px 0; border-top:1px solid var(--rule-soft);}
+  h2{font-size:1.05rem; font-family:var(--font-sans); font-weight:700; letter-spacing:.02em; margin:0 0 8px;}
+  .section-lede{color:var(--muted); margin:0 0 34px; max-width:64ch;}
+  .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:24px;}
+  @media (max-width:640px){ .grid{grid-template-columns:1fr;} h1{font-size:2.4rem;} }
+  .card{
+    background:var(--surface); border:1px solid var(--rule); border-radius:12px; padding:24px 26px;
+  }
+  .card h3{margin:0 0 8px; font-size:1.18rem; font-weight:600;}
+  .card p{margin:0; color:var(--muted); font-size:1.02rem; line-height:1.55;}
+  .card .k{
+    font-family:var(--font-sans); font-size:.72rem; font-weight:700; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--accent-soft); margin:0 0 12px;
+  }
+
+  .safety{background:var(--rule-soft); border-radius:14px; padding:36px 34px; margin-top:8px;}
+  .safety h2{color:var(--accent);}
+  .safety p{color:var(--ink); max-width:66ch; margin:0;}
+
+  footer.site{
+    border-top:1px solid var(--rule); padding:34px 0 60px; margin-top:24px;
+    font-family:var(--font-sans); font-size:.9rem; color:var(--muted);
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:14px;
+  }
+  footer.site a{color:var(--accent); text-decoration:none;}
+  footer.site a:hover{text-decoration:underline;}
+  footer .links{display:flex; gap:20px; flex-wrap:wrap;}
+  a:focus-visible, .btn:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:6px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="site">
+    <span class="brand">
+      <svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2 21 7v10l-9 5-9-5V7l9-5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+      ParaFrames
+    </span>
+    <nav class="top">
+      <a href="#what">What it is</a>
+      <a href="#safety">Safety</a>
+      <a href="https://research.paraframes.org">Research</a>
+      <a href="https://privacy.paraframes.org">Privacy</a>
+      <a href="https://tos.paraframes.org">Terms</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <p class="eyebrow">ParaFrames</p>
+    <h1>An AI tutor that helps students learn — and keeps their data on-prem.</h1>
+    <p class="sub">
+      ParaFrames is an educational assistant for students. It guides you through
+      problems with questions instead of just handing over answers, works across
+      subjects, and runs its core tutoring on our own servers — so a student’s
+      work stays private by design.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://research.paraframes.org">See the research</a>
+      <a class="btn ghost" href="mailto:support@paraframes.org">Get in touch</a>
+    </div>
+  </div>
+
+  <section id="what">
+    <h2>What ParaFrames does</h2>
+    <p class="section-lede">
+      A single tutor that meets students where they are — from a math walkthrough
+      to a first circuit — while keeping a teacher’s judgment about <em>how</em> to help.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <p class="k">Socratic tutoring</p>
+        <h3>Guides, doesn’t just answer</h3>
+        <p>Across math, science, language arts, and civics, ParaFrames asks
+          leading questions and escalates to hints and worked steps — so students
+          build understanding, not just copy a result.</p>
+      </div>
+      <div class="card">
+        <p class="k">Make &amp; build</p>
+        <h3>Diagrams, sheets, circuits</h3>
+        <p>Describe what you need and ParaFrames drafts a 2D/3D CAD sketch, a
+          working spreadsheet, or a beginner circuit — each checked by a
+          deterministic validator before you see it.</p>
+      </div>
+      <div class="card">
+        <p class="k">Knowledge Library</p>
+        <h3>Your notes, searchable</h3>
+        <p>Snap a photo of handwritten notes to turn them into editable text and
+          math, and keep your materials in a personal library you can ask questions
+          against.</p>
+      </div>
+      <div class="card">
+        <p class="k">Efficient by design</p>
+        <h3>Capability, not just scale</h3>
+        <p>ParaFrames runs efficient models on modest hardware — a research focus
+          on getting frontier-quality help without frontier-scale cost or energy.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="safety">
+    <div class="safety">
+      <h2>Built for students, safe by design</h2>
+      <p>
+        Every message is screened by on-device safety moderation before a student
+        ever sees a reply, and ParaFrames is age-gated at sign-up: consumer accounts
+        are for ages 13 and up, and under-13 students use ParaFrames only through
+        their school. Student content is processed on our own servers and is never
+        used to train our models or sold. Read the
+        <a href="https://privacy.paraframes.org">Privacy Policy</a> and
+        <a href="https://tos.paraframes.org">Terms of Service</a>.
+      </p>
+    </div>
+  </section>
+
+  <footer class="site">
+    <span>© 2026 ParaFrames · <a href="mailto:support@paraframes.org">support@paraframes.org</a></span>
+    <span class="links">
+      <a href="https://research.paraframes.org">Research</a>
+      <a href="https://privacy.paraframes.org">Privacy</a>
+      <a href="https://tos.paraframes.org">Terms</a>
+    </span>
+  </footer>
+</div>
+</body>
+</html>
