@@ -75,6 +75,7 @@ AUDIENCE_MODES = {
     "edu":      {"socratic", "graduated_hint"},
     "consumer": {"socratic", "graduated_hint", "normal"},
     "internal": {"socratic", "graduated_hint", "normal"},  # dev/TUI
+    "research": {"socratic", "graduated_hint", "normal"},  # hired researchers
 }
 
 SUBJECT_MODEL = {
@@ -116,20 +117,34 @@ def model_for(mode: str, subject: str) -> str:
 # ORIGINAL name of the single paid tier and is kept as a working alias for plus
 # so existing keys (gateway_keys.json, and the edu->paid derivation below) keep
 # their access; nothing has to be re-issued.
-TIERS = ("free", "plus", "premier", "dev")
+TIERS = ("free", "plus", "premier", "dev", "research")
 TIER_LABEL = {"free": "Free", "plus": "Plus", "premier": "Premier",
-              "dev": "Dev", "paid": "Plus"}
+              "dev": "Dev", "research": "Research", "paid": "Plus"}
 # Every tier above free may reach the GPU (v4 / Kalvi 4).
-PAID_TIERS = {"plus", "premier", "dev", "paid"}
+PAID_TIERS = {"plus", "premier", "dev", "paid", "research"}
 
 # The off-box, third-party models (Gemini / Claude on Vertex) are a Premier
 # perk, NOT a general paid perk: Plus reaches v4 on the GPU but not the external
 # providers. "paid" is the legacy alias of Plus, so it is deliberately excluded.
-EXTERNAL_MODEL_TIERS = {"premier", "dev"}
+# Research (hired researchers) gets the external providers too.
+EXTERNAL_MODEL_TIERS = {"premier", "dev", "research"}
+
+# Access to the AWS research cloud — a hook for hired researchers. The route(s)
+# that will front AWS check this; nothing else grants it. (AWS wiring TBD.)
+RESEARCH_CLOUD_TIERS = {"research"}
+RESEARCH_CLOUD_AUDIENCES = {"research"}
 
 
 def can_use_external(rec: dict) -> bool:
     return tier_of(rec) in EXTERNAL_MODEL_TIERS
+
+
+def can_use_research_cloud(rec: dict) -> bool:
+    """True for hired researchers (the Research env). Gate any AWS research-cloud
+    route on this. Decoupled from the app tiers so it can be granted/revoked
+    independently once the AWS side exists."""
+    return (rec.get("audience") in RESEARCH_CLOUD_AUDIENCES
+            or tier_of(rec) in RESEARCH_CLOUD_TIERS)
 
 VERSION_ACCESS = {
     "v2": {"free"} | PAID_TIERS,
@@ -143,7 +158,7 @@ PREFERRED_VERSION_ORDER = ("v4", "v3", "v2")   # best first, for defaulting
 # CPU model on llama.cpp). v4 stays in VERSION_ACCESS but only answers if a GPU
 # vLLM is ever running again; on the CPU box a request for it 503s by design.
 DEFAULT_VERSION_BY_TIER = {"free": "v2", "plus": "v2", "premier": "v2",
-                           "paid": "v2", "dev": "v2"}
+                           "paid": "v2", "dev": "v2", "research": "v2"}
 VERSION_MODEL = {"v2": "paraclient-v2", "v3": "paraclient-v3"}  # CPU llama.cpp names
 
 # Knowledge Library (per-user RAG) storage allowance per tier. Decimal units,
@@ -155,6 +170,7 @@ TIER_STORAGE_BYTES = {
     "plus":       1 * _TB,
     "premier":   2 * _TB,
     "dev":        4 * _TB,
+    "research":   4 * _TB,
     "paid":       1 * _TB,          # legacy alias of plus
 }
 
@@ -164,7 +180,7 @@ TIER_STORAGE_BYTES = {
 # ~16 tok/s, so a real 400-token answer already takes ~25s and no human
 # approaches these numbers. They exist to stop a runaway loop or an abusive
 # signup from monopolising the single GPU, not to shape normal use.
-UNLIMITED_TIERS = {"dev"}
+UNLIMITED_TIERS = {"dev", "research"}   # staff + hired researchers: never throttled
 TIER_RPM = {"free": 20, "plus": 60, "premier": 120, "paid": 60}
 DEFAULT_RPM = 20
 
@@ -194,13 +210,14 @@ TIER_MAX_SESSIONS = {"free": 50, "plus": 100, "premier": 1000, "paid": 100}
 # Context window per tier. The v4 server is started with --max-model-len 16384,
 # so premier gets the full window and lower tiers are clamped below it.
 TIER_MAX_CONTEXT = {"free": 4096, "plus": 8192, "premier": 16384,
-                    "paid": 8192, "dev": 16384}
+                    "paid": 8192, "dev": 16384, "research": 16384}
 
 # vLLM scheduling priority — LOWER IS HANDLED EARLIER. Only has an effect when
 # the server runs with --scheduling-policy priority (see serve_g4_fp8.sh);
 # under the default fcfs policy the field is accepted and ignored, so this is
 # safe to send either way.
-TIER_PRIORITY = {"premier": 0, "dev": 0, "plus": 5, "paid": 5, "free": 10}
+TIER_PRIORITY = {"premier": 0, "dev": 0, "research": 0, "plus": 5, "paid": 5,
+                 "free": 10}
 
 
 def max_sessions_for(rec: dict) -> int | None:
@@ -724,6 +741,7 @@ def build_app(tutor_url: str, tutor_key: str):
                 "library_storage_bytes": storage_bytes_for(rec),
                 "library_storage": human_bytes(storage_bytes_for(rec)),
                 "monthly_request_limit": monthly_quota_for(rec),
+                "research_cloud": can_use_research_cloud(rec),
                 "rpm": rpm_for(rec),
                 "max_sessions": max_sessions_for(rec),
                 "max_context": max_context_for(rec),
@@ -817,7 +835,13 @@ def build_app(tutor_url: str, tutor_key: str):
 
         team = accounts.paraframes_team(email)
         try:
-            if team is not None:
+            if team == "research":
+                # Hired researchers: @research.paraframes.org -> the Research env
+                # (unlimited app access + AWS research-cloud capability).
+                out = accounts.provision_oauth(
+                    email, provider="google", tier="research", team="research",
+                    audience="research", label="google-sso")
+            elif team is not None:
                 out = accounts.provision_oauth(
                     email, provider="google", tier="dev", team=team,
                     audience="internal", label="google-sso")
@@ -861,6 +885,7 @@ def build_app(tutor_url: str, tutor_key: str):
                 "max_context": max_context_for(rec),
                 "queue_priority": priority_for(rec),
                 "external_models": can_use_external(rec),
+                "research_cloud": can_use_research_cloud(rec),
                 "sessions": {"active": accounts.active_sessions(rec.get("user")),
                              "limit": max_sessions_for(rec)},
                 "usage": _usage_block(rec)}
@@ -1078,7 +1103,7 @@ def build_app(tutor_url: str, tutor_key: str):
         # streaming skips per-token output moderation -- acceptable for adults
         # (13+), whose input is still screened; not offered to children.
         if (bool(body.get("stream")) and not perf["eco"]
-                and rec.get("audience") in ("internal", "consumer")):
+                and rec.get("audience") in ("internal", "consumer", "research")):
             meta = {"version": version, "model": model,
                     "product": product_for(rec),
                     "model_name": display_version(rec, version),

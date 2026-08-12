@@ -175,8 +175,8 @@ check("delete reports keys removed", isinstance(n, int) and n >= 0)
 print("\n=== tiers: model access, storage quotas, rate limiting ===")
 import auth_gateway as gw  # noqa: E402
 
-check("tiers are free/plus/premier/dev",
-      gw.TIERS == ("free", "plus", "premier", "dev"), str(gw.TIERS))
+check("tiers are free/plus/premier/dev/research",
+      gw.TIERS == ("free", "plus", "premier", "dev", "research"), str(gw.TIERS))
 
 # Storage allowances exactly as specified.
 GB, TB = 1000 ** 3, 1000 ** 4
@@ -404,6 +404,17 @@ con = accounts.provision_oauth("newperson@gmail.com", provider="google",
                                tier="free", audience="consumer", gate_token=_gt)
 check("consumer google (age-gated) -> free tier", con["tier"] == "free", str(con))
 check("consumer google account has no team", con["team"] is None)
+
+# Research env: hired researchers provision as audience+tier 'research' (the
+# gateway routes @research.paraframes.org here; provision_oauth is the mechanism).
+res = accounts.provision_oauth("dana@research.paraframes.org", provider="google",
+                               tier="research", team="research",
+                               audience="research", label="google-sso")
+check("research email -> research tier", res["tier"] == "research", str(res))
+check("research account audience is research", res["audience"] == "research")
+rrec = accounts.record_for_key(res["api_key"])
+check("record_for_key resolves a research account",
+      rrec and rrec["tier"] == "research" and rrec["audience"] == "research", str(rrec))
 
 print(f"\n{'='*54}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
