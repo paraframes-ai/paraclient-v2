@@ -263,6 +263,48 @@ def human_bytes(n: int) -> str:
     return f"{n // _TB} TB" if n >= _TB else f"{n // _GB} GB"
 
 
+# --- Per-request performance modes -----------------------------------------
+# Users trade speed / quality / energy per request, and the credit cost follows:
+#   turbo (consumer streaming): 2x credits, fastest perceived latency (raw token
+#                               stream, first token in ~seconds vs the whole reply).
+#   eco  (sustainability):      0.5x credits, smallest on-prem model, fewer
+#                               retries, lowest priority -- genuinely less compute
+#                               per request, so the discount reflects real savings.
+#   effort (fastest/balanced/highest): tunes retries/steps/length, 1x credits.
+ECO_CREDIT_FACTOR = 0.5
+TURBO_CREDIT_FACTOR = 2.0
+EFFORT_LEVELS = ("fastest", "balanced", "highest")
+
+
+def perf_mode(body: dict, audience: str | None = None) -> dict:
+    """Parse per-request performance flags -> {eco, turbo, effort, weight}."""
+    eco = bool(body.get("eco"))
+    # turbo = consumer streaming. Only the consumer (adult) path may stream, and
+    # only it is billed the 2x turbo rate; eco takes precedence over turbo.
+    turbo = (not eco and bool(body.get("stream")) and audience == "consumer")
+    effort = str(body.get("effort", "balanced")).strip().lower()
+    if effort not in EFFORT_LEVELS:
+        effort = "balanced"
+    weight = (ECO_CREDIT_FACTOR if eco
+              else TURBO_CREDIT_FACTOR if turbo else 1.0)
+    return {"eco": eco, "turbo": turbo, "effort": effort, "weight": weight}
+
+
+def effort_tries(effort: str, base: int) -> int:
+    """Rejection-sampling tries for a structured route at the chosen effort."""
+    return {"fastest": 1, "balanced": base, "highest": base + 1}.get(effort, base)
+
+
+def _perf_block(perf: dict) -> dict:
+    """What the client shows about this request's mode + credit cost."""
+    b = {"mode": ("eco" if perf["eco"]
+                  else "turbo" if perf["turbo"] else "normal"),
+         "effort": perf["effort"], "credit_cost": perf["weight"]}
+    if perf["eco"]:
+        b["eco_savings"] = "~50% less compute vs standard"
+    return b
+
+
 # Product naming. The EDU line is branded KALVI; consumer stays ParaClient.
 # Generations line up one-for-one, so v2/v3/v4 read as Kalvi 2/3/4 to a school
 # and ParaClient 2/3/4 to a consumer -- the same served weights either way.
@@ -493,7 +535,7 @@ def build_app(tutor_url: str, tutor_key: str):
                       "v3": OpenAI(base_url=V3_URL, api_key="none")}
     print(f"[*] free-tier versions -> v2 {V2_URL} | v3 {V3_URL} (CPU)")
 
-    def gen_circuit(prompt: str) -> dict:
+    def gen_circuit(prompt: str, tries: int = 3) -> dict:
         """Netlist on the CPU circuit model with ERC-gated rejection sampling:
         try a few, return the first electrically-valid one (else the best-effort
         structurally-clean last result)."""
@@ -506,7 +548,7 @@ def build_app(tutor_url: str, tutor_key: str):
               "json_schema": {"name": "circuit_netlist",
                               "schema": circuit_guided_schema()}}
         last = None
-        for _ in range(3):
+        for _ in range(max(1, tries)):
             try:
                 r = circuit.chat.completions.create(
                     model="circuit", messages=msgs,
@@ -530,7 +572,7 @@ def build_app(tutor_url: str, tutor_key: str):
             return last          # ERC-imperfect but structurally clean
         raise RuntimeError("no parseable netlist from circuit model")
 
-    def gen_spreadsheet(prompt: str) -> dict:
+    def gen_spreadsheet(prompt: str, tries: int = 2) -> dict:
         """Spreadsheet JSON on the spreadsheet adapter with a formula-gated
         rejection sample: return the first sheet whose formulas all compute
         (spreadsheet_issues), else the best-effort structurally-clean last one."""
@@ -543,7 +585,7 @@ def build_app(tutor_url: str, tutor_key: str):
               "json_schema": {"name": "spreadsheet",
                               "schema": spreadsheet_guided_schema()}}
         last = None
-        for _ in range(2):
+        for _ in range(max(1, tries)):
             try:
                 r = tutor.chat.completions.create(
                     model=SPREADSHEET_MODEL, messages=msgs,
@@ -631,16 +673,17 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(401, "invalid key")
         return tok, rec
 
-    def auth(authorization: str | None):
-        """Validate + rate-limit (for the model/generation routes).
+    def auth(authorization: str | None, weight: float = 1.0):
+        """Validate + rate-limit + meter (for the model/generation routes).
 
         Two independent limits, both exempt for dev (UNLIMITED_TIERS):
           * RATE  — requests/minute, per key. Stops a burst (TIER_RPM).
-          * USAGE — requests/month, per user. Caps what a plan is worth
-                    (TIER_MONTHLY_REQUESTS). Metered here because auth() is the
-                    one choke point every model route funnels through; that
-                    counts a request at admission, so a turn later refused by
-                    the safety filter still consumes quota.
+          * USAGE — CREDITS/month, per user. Caps what a plan is worth. `weight`
+                    is the credit cost of this request (turbo=2x, eco=0.5x,
+                    normal=1x). Metered here because auth() is the one choke
+                    point every model route funnels through; the request is
+                    counted at admission, so a turn later refused by the safety
+                    filter still consumes quota.
         """
         tok, rec = lookup(authorization)
         rpm = rpm_for(rec)
@@ -652,14 +695,14 @@ def build_app(tutor_url: str, tutor_key: str):
         quota = monthly_quota_for(rec)
         if quota is not None:
             user = rec.get("user")
-            used = accounts.usage_for(user)["requests"]
+            used = accounts.usage_for(user)["credits"]
             if used >= quota:
                 plan = TIER_LABEL.get(tier_of(rec), "Free")
                 raise HTTPException(
-                    402, f"monthly usage limit reached ({used}/{quota} requests "
+                    402, f"monthly usage limit reached ({used:g}/{quota} credits "
                          f"on the {plan} plan). It resets at the start of next "
                          f"month, or upgrade for a higher limit.")
-            accounts.record_usage(user, requests=1)
+            accounts.record_usage(user, requests=1, credits=weight)
         return rec
 
     @app.post("/v1/auth/validate")
@@ -826,10 +869,14 @@ def build_app(tutor_url: str, tutor_key: str):
         """This period's meter vs the plan's allowance."""
         u = accounts.usage_for(rec.get("user"))
         quota = monthly_quota_for(rec)
+        used = u.get("credits", u["requests"])   # quota is spent in credits
         return {"period": u["period"], "requests_used": u["requests"],
-                "requests_limit": quota,
+                "credits_used": used, "requests_limit": quota,
+                "credits_limit": quota,
                 "requests_remaining": (None if quota is None
-                                       else max(0, quota - u["requests"])),
+                                       else max(0, quota - used)),
+                "credits_remaining": (None if quota is None
+                                      else round(max(0, quota - used), 3)),
                 "tokens_used": u["tokens"], "unlimited": quota is None}
 
     @app.post("/v1/session/open")
@@ -966,11 +1013,14 @@ def build_app(tutor_url: str, tutor_key: str):
 
     @app.post("/v1/chat")
     async def chat(request: Request, authorization: str | None = Header(None)):
-        rec = auth(authorization)
         body = await request.json()
+        _, rec_peek = lookup(authorization)        # validate + read audience
+        perf = perf_mode(body, rec_peek.get("audience"))
+        rec = auth(authorization, weight=perf["weight"])
         mode = body.get("mode", "socratic")
         subject = body.get("subject", "general")
         messages = body.get("messages", [])
+        style = str(body.get("style", "")).strip()[:2000]
 
         if mode not in AUDIENCE_MODES.get(rec["audience"], set()):
             raise HTTPException(
@@ -978,6 +1028,9 @@ def build_app(tutor_url: str, tutor_key: str):
 
         # Tier gate: which ParaClient version this key may use (v4 = paid/dev).
         version = resolve_version(rec, body.get("version"))
+        # Eco: force the smallest on-prem model (never the GPU/external path).
+        if perf["eco"]:
+            version = "v2"
 
         user_turns = [m for m in messages if m.get("role") == "user"]
         latest = user_turns[-1]["content"] if user_turns else ""
@@ -988,7 +1041,13 @@ def build_app(tutor_url: str, tutor_key: str):
                                  "safety": {"action": din.action.value,
                                             "categories": din.categories}})
 
-        sys_msg = {"role": "system", "content": system_prompt(mode, subject)}
+        sys_content = system_prompt(mode, subject)
+        if style:
+            # Writing-style preference. Shapes formatting/tone only; the reply is
+            # still output-moderated, so this can't override safety.
+            sys_content += ("\n\nUser style preference (apply to formatting and "
+                            "tone; never override the rules above): " + style)
+        sys_msg = {"role": "system", "content": sys_content}
         convo = [sys_msg] + [m for m in messages if m.get("role") != "system"]
         # v4 -> GPU adapter model; v2/v3 -> CPU llama.cpp base for that generation
         if version == "v4":
@@ -998,8 +1057,10 @@ def build_app(tutor_url: str, tutor_key: str):
         # Tier perks: premier gets the full context window and jumps the GPU
         # queue. `priority` is a vLLM extra -- only send it to the v4 (vLLM)
         # backend; the CPU llama.cpp servers would reject an unknown field.
-        max_tok = max(1, min(int(body.get("max_tokens", 400) or 400),
-                             max_context_for(rec)))
+        req_max = int(body.get("max_tokens", 400) or 400)
+        if perf["eco"] or perf["effort"] == "fastest":
+            req_max = min(req_max, 250)          # shorter answer = less compute
+        max_tok = max(1, min(req_max, max_context_for(rec)))
         extra = ({"priority": priority_for(rec)} if version == "v4" else None)
         temperature = body.get("temperature", 0.3)
 
@@ -1011,10 +1072,18 @@ def build_app(tutor_url: str, tutor_key: str):
         # implemented and measured but is not viable on this CPU box: the guard
         # costs 10-20s/call and false-positives on partial sentences, making it
         # slower and less correct than the single-shot blocking moderation.
-        if bool(body.get("stream")) and rec.get("audience") == "internal":
+        # Turbo = consumer streaming (fast first token, billed 2x). `internal`
+        # keeps its dev stream. Edu never streams (no fast per-token moderation
+        # yet); eco never streams (it defers/batches for efficiency). Consumer
+        # streaming skips per-token output moderation -- acceptable for adults
+        # (13+), whose input is still screened; not offered to children.
+        if (bool(body.get("stream")) and not perf["eco"]
+                and rec.get("audience") in ("internal", "consumer")):
             meta = {"version": version, "model": model,
                     "product": product_for(rec),
-                    "model_name": display_version(rec, version)}
+                    "model_name": display_version(rec, version),
+                    "mode": "turbo" if perf["turbo"] else "stream",
+                    "credit_cost": perf["weight"]}
             return StreamingResponse(
                 _raw_chat_stream(client, model, convo, max_tok,
                                  temperature, extra, meta, version),
@@ -1042,11 +1111,14 @@ def build_app(tutor_url: str, tutor_key: str):
                              # stays the internal serving id.
                              "product": product_for(rec),
                              "model_name": display_version(rec, version),
+                             "performance": _perf_block(perf),
                              "safety": {"action": dout.action.value}})
 
     @app.post("/v1/generate")
     async def generate(request: Request, authorization: str | None = Header(None)):
-        rec = auth(authorization)
+        body = await request.json()
+        perf = perf_mode(body)              # docs/slides: eco applies, no turbo
+        rec = auth(authorization, weight=perf["weight"])
         # Docs/slides are a NON-SOCRATIC capability (direct generation), so they
         # follow the same audience rule as the 'normal' mode: consumer/internal
         # only, never EDU.
@@ -1054,14 +1126,18 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(
                 403, f"document/slide generation (non-socratic) not allowed "
                      f"for audience '{rec['audience']}'")
-        body = await request.json()
         kind = body.get("kind")
         if kind not in ("slides", "doc"):
             raise HTTPException(400, "kind must be 'slides' or 'doc'")
         prompt = body.get("prompt", "")
-        # web=False -> single-pass generation (fast, grounded in provided source);
-        # web=True (default) -> the agentic web-research generator.
+        style = str(body.get("style", "")).strip()[:2000]
+        # web=True -> agentic research loop; web=False -> single-pass (much less
+        # compute). Eco/fastest force single-pass; highest forces the research loop.
         web = bool(body.get("web", True))
+        if perf["eco"] or perf["effort"] == "fastest":
+            web = False
+        elif perf["effort"] == "highest":
+            web = True
         din = filt.screen_input(prompt)
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
@@ -1076,9 +1152,10 @@ def build_app(tutor_url: str, tutor_key: str):
         # `tutor` now points at the CPU model server; it ignores the model name.
         gen_client = tutor
         gen_model = VERSION_MODEL.get("v2", "paraclient-v2")
+        gen_prompt = f"Style preferences: {style}\n\n{prompt}" if style else prompt
         try:
-            data = (gm.generate_agentic(gen_client, gen_model, kind, prompt) if web
-                    else gm.generate_guided(gen_client, gen_model, kind, prompt))
+            data = (gm.generate_agentic(gen_client, gen_model, kind, gen_prompt) if web
+                    else gm.generate_guided(gen_client, gen_model, kind, gen_prompt))
             name, theme = gm.pick_theme(data, body.get("theme"))
             ext = "pptx" if kind == "slides" else "docx"
             out = Path("out") / f"gen-{int(time.time()*1000)}.{ext}"
@@ -1092,9 +1169,10 @@ def build_app(tutor_url: str, tutor_key: str):
         return JSONResponse({"kind": kind, "theme": name, "filename": out.name,
                              "content_type": ctype, "file_base64": b,
                              "authored_by": gen_model, "provider": "paraclient (on-prem)",
-                             "on_prem": True})
+                             "on_prem": True, "web_research": web,
+                             "performance": _perf_block(perf)})
 
-    def _cad_route(mode: str, rec: dict, body: dict):
+    def _cad_route(mode: str, rec: dict, body: dict, perf: dict):
         # Non-socratic capability -> consumer/internal only (same rule as generate)
         if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
             raise HTTPException(
@@ -1118,37 +1196,45 @@ def build_app(tutor_url: str, tutor_key: str):
                 print(f"[cad] floor-plan auto-repaired (model geometry invalid: {issues})")
         else:
             out = clean_solid(data, units)
+        out["performance"] = _perf_block(perf)
         return JSONResponse(out)
 
     @app.post("/v1/sketch")
     async def sketch(request: Request, authorization: str | None = Header(None)):
-        rec = auth(authorization)
-        return _cad_route("sketch", rec, await request.json())
+        body = await request.json()
+        perf = perf_mode(body)
+        rec = auth(authorization, weight=perf["weight"])
+        return _cad_route("sketch", rec, body, perf)
 
     @app.post("/v1/3d")
     async def three_d(request: Request, authorization: str | None = Header(None)):
-        rec = auth(authorization)
-        return _cad_route("3d", rec, await request.json())
+        body = await request.json()
+        perf = perf_mode(body)
+        rec = auth(authorization, weight=perf["weight"])
+        return _cad_route("3d", rec, body, perf)
 
     @app.post("/v1/circuit")
     async def circuit_route(request: Request,
                             authorization: str | None = Header(None)):
-        rec = auth(authorization)
+        body = await request.json()
+        perf = perf_mode(body)
+        rec = auth(authorization, weight=perf["weight"])
         if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
             raise HTTPException(
                 403, f"circuit generation (non-socratic) not allowed for "
                      f"audience '{rec['audience']}'")
-        body = await request.json()
         prompt = body.get("prompt", "")
         if not prompt:
             raise HTTPException(400, "prompt required")
         din = filt.screen_input(prompt)
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
+        tries = 1 if perf["eco"] else effort_tries(perf["effort"], 3)
         try:
-            data = gen_circuit(prompt)
+            data = gen_circuit(prompt, tries=tries)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"circuit generation failed: {e}")
+        data["performance"] = _perf_block(perf)
         return JSONResponse(data)
 
     @app.post("/v1/spreadsheet")
@@ -1159,12 +1245,13 @@ def build_app(tutor_url: str, tutor_key: str):
         non-socratic capability -> consumer/internal only (same as CAD/circuit).
         Generated sheets are returned with their computed values and a `valid`
         flag from the same evaluator the dataset was built with."""
-        rec = auth(authorization)
+        body = await request.json()
+        perf = perf_mode(body)
+        rec = auth(authorization, weight=perf["weight"])
         if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
             raise HTTPException(
                 403, f"spreadsheet generation (non-socratic) not allowed for "
                      f"audience '{rec['audience']}'")
-        body = await request.json()
         prompt = (body.get("prompt") or "").strip()
         if not prompt:
             raise HTTPException(400, "prompt required")
@@ -1188,17 +1275,20 @@ def build_app(tutor_url: str, tutor_key: str):
             if dout.action != Action.ALLOW:
                 answer = dout.student_message
             return JSONResponse({"mode": "tutor", "answer": answer,
+                                 "performance": _perf_block(perf),
                                  "safety": {"action": dout.action.value}})
 
+        tries = 1 if perf["eco"] else effort_tries(perf["effort"], 2)
         try:
-            sheet = gen_spreadsheet(prompt)
+            sheet = gen_spreadsheet(prompt, tries=tries)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"spreadsheet generation failed: {e}")
         ok, issues = spreadsheet_issues(sheet)
         values, _errs = evaluate_sheet(sheet.get("cells", []))
         return JSONResponse({"mode": "generate", "title": sheet.get("title"),
                              "cells": sheet.get("cells", []),
-                             "computed": values, "valid": ok, "issues": issues})
+                             "computed": values, "valid": ok, "issues": issues,
+                             "performance": _perf_block(perf)})
 
     @app.post("/v1/civics")
     async def civics_route(request: Request,

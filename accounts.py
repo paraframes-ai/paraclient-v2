@@ -159,6 +159,10 @@ def init_db() -> None:
             period   TEXT NOT NULL,
             requests INTEGER NOT NULL DEFAULT 0,
             tokens   INTEGER NOT NULL DEFAULT 0,
+            -- Quota-weighted cost: turbo requests bill 2x, eco 0.5x, normal 1x.
+            -- `requests` stays the raw count (for display); `credits` is what the
+            -- monthly quota is spent against.
+            credits  REAL NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, period)
         );
         -- Concurrent active sessions, capped per tier. Sessions expire on idle
@@ -179,6 +183,12 @@ def init_db() -> None:
         if "auth_provider" not in cols:
             con.execute("ALTER TABLE accounts ADD COLUMN auth_provider "
                         "TEXT NOT NULL DEFAULT 'password'")
+        ucols = {r["name"] for r in con.execute("PRAGMA table_info(usage)")}
+        if "credits" not in ucols:
+            con.execute("ALTER TABLE usage ADD COLUMN credits REAL NOT NULL "
+                        "DEFAULT 0")
+            # backfill: existing rows billed 1 credit per request
+            con.execute("UPDATE usage SET credits = requests WHERE credits = 0")
 
 
 # --------------------------------------------------------------------------
@@ -501,28 +511,38 @@ def current_period(now: float | None = None) -> str:
     return f"{t.tm_year:04d}-{t.tm_mon:02d}"
 
 
-def record_usage(user_id: str, requests: int = 1, tokens: int = 0) -> None:
-    """Add to this user's meter for the current period."""
+def record_usage(user_id: str, requests: int = 1, tokens: int = 0,
+                 credits: float | None = None) -> None:
+    """Add to this user's meter for the current period.
+
+    `credits` is the quota-weighted cost of the request (turbo = 2x, eco = 0.5x);
+    it defaults to the raw request count, so ordinary usage bills 1 credit each
+    and existing behaviour is unchanged."""
     if not user_id:
         return
+    if credits is None:
+        credits = float(requests)
     with _connect() as con:
         con.execute(
-            "INSERT INTO usage(user_id, period, requests, tokens) "
-            "VALUES (?,?,?,?) ON CONFLICT(user_id, period) DO UPDATE SET "
+            "INSERT INTO usage(user_id, period, requests, tokens, credits) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(user_id, period) DO UPDATE SET "
             "requests = requests + excluded.requests, "
-            "tokens   = tokens   + excluded.tokens",
-            (user_id, current_period(), requests, tokens))
+            "tokens   = tokens   + excluded.tokens, "
+            "credits  = credits  + excluded.credits",
+            (user_id, current_period(), requests, tokens, credits))
 
 
 def usage_for(user_id: str) -> dict:
-    """This period's usage. Missing row = nothing used yet."""
+    """This period's usage. Missing row = nothing used yet. `credits` is the
+    quota-weighted total; `requests` is the raw count."""
     with _connect() as con:
         row = con.execute(
-            "SELECT requests, tokens FROM usage WHERE user_id=? AND period=?",
+            "SELECT requests, tokens, credits FROM usage WHERE user_id=? AND period=?",
             (user_id, current_period())).fetchone()
     return {"period": current_period(),
             "requests": row["requests"] if row else 0,
-            "tokens": row["tokens"] if row else 0}
+            "tokens": row["tokens"] if row else 0,
+            "credits": round(row["credits"], 3) if row else 0.0}
 
 
 def reset_usage(user_id: str) -> None:
