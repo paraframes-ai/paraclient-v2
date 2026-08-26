@@ -730,6 +730,9 @@ def build_app(tutor_url: str, tutor_key: str):
         is held ONLY by that server — never sent to browsers."""
         _, rec = lookup(authorization)
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
+                # email lets a downstream service (e2's Knowledge Library) key a
+                # user's data off the same identity when it accepts this Bearer.
+                "email": (accounts.get_account(rec.get("user")) or {}).get("email"),
                 "team": rec.get("team"),
                 "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], [])),
                 "tier": tier_of(rec), "allowed_versions": versions_for(rec),
