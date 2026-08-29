@@ -1,73 +1,98 @@
-# ParaFrames Tutor — Adapter Training Pipeline
+# ParaFrames
 
-One shared base (`paraframes-ai/paraclient`) + one LoRA adapter per
-subject. Each adapter learns **two modes** from the data:
+ParaFrames is an on-premise AI workspace for tutoring and structured content
+creation. The serving stack is designed for private deployment on efficient
+CPU hardware: prompts, student data, retrieval, moderation, and generation can
+remain inside the customer's network boundary.
 
-- **socratic** — withholds the answer, guides with questions.
-- **graduated_hint** — guides first, then escalates to hints/worked steps so a
-  stuck student can finish (homework mode).
+The model and training program is developed under the Munivar name.
 
-Mode is chosen at inference via the system prompt; both are in the training data
-so the adapter can do either on command.
+## System overview
 
-## Run order
+The L4 service is the authenticated API boundary. It routes requests to local
+llama.cpp model servers, applies audience and plan policy, meters usage, and
+moderates model input and output. A separate authentication service hosts the
+login BFF and Knowledge Library. Clients connect to both services through a
+private Tailscale network.
+
+| Component | Responsibility |
+| --- | --- |
+| `auth_gateway.py` | Authentication, authorization, metering, safety, and model routing |
+| `accounts.py` | Accounts, sessions, plans, generated artifacts, and sharing |
+| `generate_media.py` | Schema-guided document and presentation generation |
+| `cad_schema.py` | Deterministic geometry validation |
+| `circuit_schema.py` | Circuit normalization and electrical-rule checks |
+| `spreadsheet_schema.py` | Spreadsheet normalization and formula evaluation |
+| `moderation.py` | On-premise ShieldGemma moderation backend |
+| `guard_distill/` | Training and evaluation for the low-latency guard |
+
+The API exposes tutoring, document and presentation generation, CAD, circuits,
+spreadsheets, civics, notes transcription, embeddings, and optional external
+model routes. Education traffic is restricted to on-premise models.
+
+## Design principles
+
+- Private by architecture: education data is processed locally.
+- Correct by construction: structured outputs use constrained schemas and
+  deterministic validators.
+- Fail closed: unavailable moderation blocks protected workflows.
+- Capability per watt: the default serving path targets quantized models on
+  commodity CPU infrastructure.
+- Stable client contract: applications integrate through one versioned gateway.
+
+## Local setup
+
+Python 3.11 or newer is recommended.
 
 ```bash
-# 0. install (on your L4 VM, in a venv)
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-
-# 1. build data for a subject -> data/<subject>.jsonl
-python scripts/build_dataset.py --subject math          # full set
-python scripts/build_dataset.py --subject math --limit 200   # quick test
-
-# 2. train the adapter (QLoRA, fits a single 24GB L4) -> adapters/<subject>/
-python scripts/train_adapter.py --subject math --data data/math.jsonl
-
-# 3. serve with vLLM (separate terminal)
-vllm serve Qwen/Qwen2.5-7B-Instruct \
-    --enable-lora \
-    --lora-modules math=adapters/math \
-    --max-model-len 4096 --gpu-memory-utilization 0.9
-
-# 4. behavioral eval (does it withhold? does it escalate?)
-python scripts/eval_adapter.py --adapter math
 ```
 
-Serve several subjects at once by listing more `--lora-modules` and raising
-`--max-loras`. Select the subject per request via the `model` field.
+Runtime configuration belongs in `.env.dev`, which is excluded from version
+control. Model weights, account databases, generated files, and training data
+are also excluded.
 
-## Per-subject data status
+Start the local model services before the gateway:
 
-| Subject        | Source                              | Status                         |
-|----------------|-------------------------------------|--------------------------------|
-| math           | GSM8K-socratic (MIT)                | ✅ ready, builds today          |
-| civics         | synthesized from knowledge Q&A      | ⛔ needs synthesis + review     |
-| language_arts  | synthesized from knowledge Q&A      | ⛔ needs synthesis + review     |
-| general        | mix / synthesized                   | ⛔ needs synthesis + review     |
-
-For the non-math subjects, produce dialogues via the LLM-propose / human-review
-loop, save them as `data/raw/<subject>.synth.jsonl` in the **same schema**
-`build_dataset.py` emits, then run `build_dataset.py --subject <subject>` to
-validate + merge.
-
-## Licensing gate (read before training a sellable model)
-
-- **GSM8K-socratic** — MIT. Clear for commercial use. ✅
-- **MathDial** — confirm the license before adding it. Not wired in yet.
-- **Eedi tutoring dialogues** — NON-COMMERCIAL. Do not put in this pipeline. ⛔
-
-## Honest constraints
-
-- **L4 training is slow.** QLoRA of 7B fits in 24GB but expect hours per epoch.
-  Adapters are portable — train on a bigger GPU later if you want speed; serve
-  on the L4 either way.
-- **If you OOM:** drop `--max-seq-len` to 1024, keep `--batch-size 1`, raise
-  `--grad-accum`.
-- **bitsandbytes + LoRA in vLLM** can be version-sensitive. If serving misbehaves,
-  serve the base in bf16 (a 7B fits ~15GB on L4) with the adapter, or use an
-  AWQ base. Pin versions and test the exact combo early.
-- **The eval is a smoke test, not a safety guarantee.** The answer-leak check is
-  a heuristic. For a child-facing product, human-review real transcripts before
-  shipping, and keep the separate input/output safety layer we discussed OUTSIDE
-  the tutoring model — do not rely on the adapter alone to keep students safe.
+```bash
+sudo systemctl start paraclient-v2 paraclient-circuit paraclient-guard
+sudo systemctl start paraclient-gateway
 ```
+
+The deployed gateway binds to its Tailscale address rather than localhost.
+
+## Verification
+
+```bash
+./venv/bin/python test_accounts.py
+./venv/bin/python test_guard_distill.py
+./venv/bin/python -m py_compile \
+  accounts.py auth_gateway.py generate_media.py moderation.py
+```
+
+`test_accounts.py` covers age gating, account lifecycle, plan policy, usage,
+sessions, OAuth provisioning, generated artifacts, and sharing. The guard tests
+cover fail-closed behavior and response validation.
+
+## Training
+
+Dataset builders emit JSONL into the ignored `data/` directory. Adapter jobs run
+on ORCD through Slurm. For example:
+
+```bash
+python build_slideshow_theme_dataset.py
+sbatch train_slideshow_theme.sbatch
+sbatch eval_slideshow_theme.sbatch
+```
+
+Adapters are evaluated before conversion to GGUF. The slideshow theme adapter is
+loaded by llama.cpp at scale zero and enabled only for theme-selection requests.
+
+## Operational status
+
+The current deployment is an internal, single-node environment. Production work
+still includes high availability, centralized monitoring, credential rotation,
+billing integration, and completion of the distilled-guard shadow evaluation.
+See `RUNBOOK.md` and the compliance directory for operational and policy details.

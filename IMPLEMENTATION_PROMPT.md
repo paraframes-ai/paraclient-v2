@@ -1,15 +1,8 @@
-# Implementation prompt — wire the ParaFrames app to the new backend
+# Frontend integration reference
 
-Paste everything below into local Claude Code, in the app/frontend repo.
-
----
-
-You are implementing client-side support for a batch of backend changes that
-already shipped. **The backend is done and live — do not modify it.** Your job is
-the app: accounts, plans, limits, sessions, teams, and the age gate.
-
-Read this whole brief before writing code. Where a decision isn't specified,
-match the existing app's patterns rather than inventing a new one.
+This document describes the backend contracts used by the ParaFrames client.
+The frontend owns accounts, plans, limits, sessions, teams, and age-gate user
+flows. Match established client patterns when a decision is not specified.
 
 ## The two services
 
@@ -20,8 +13,9 @@ match the existing app's patterns rather than inventing a new one.
 
 Both are reachable only over the Tailscale tailnet — assume the user is on it.
 
-Auth to the **gateway** is `Authorization: Bearer <api_key>`. Auth to **e2** is a
-session cookie (`e2_session`) plus a CSRF header (`x-csrf-token`) on writes.
+The native client sends `Authorization: Bearer <api_key>` to both services. e2
+also supports browser sessions; cookie-authenticated writes require the matching
+`x-csrf-token` header.
 
 ---
 
@@ -196,8 +190,8 @@ Build: a **"Sign in with Google"** button, a team badge in the header when
 `is_dev` or a team is present, and a team page listing members from `/api/teams`.
 Users with no team must see a coherent UI — not an empty "Teams" shell.
 
-**CSRF:** e2 writes require the `x-csrf-token` header matching the `e2_csrf` cookie.
-Send it on every POST.
+**CSRF:** Browser-session writes require `x-csrf-token` matching the `e2_csrf`
+cookie. Bearer-authenticated native requests do not use CSRF tokens.
 
 ---
 
@@ -219,7 +213,8 @@ Send it on every POST.
 - The DOB never reaches storage, logs, or analytics.
 - Tests for: the age-gate branches, each error status, and plan-gated version selection.
 
-## Ask before assuming
-- Which framework/state library to use if the repo doesn't already fix it.
-- Whether the app should target the tailnet URLs above or a proxy.
-- Anything requiring a payment flow — that does not exist yet; stop and ask.
+## Open integration decisions
+
+- Use the framework and state-management conventions already present in the client.
+- Select private service URLs or a proxy per deployment environment.
+- Payment flows remain out of scope until billing is implemented.

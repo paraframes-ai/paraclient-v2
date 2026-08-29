@@ -20,6 +20,7 @@ set[str]` contract as ShieldGemma, so cutover is one env var —
 | 3. train student | `train_student.py` | **ORCD GPU** | BCE-distill a tiny encoder, 4-label head |
 | 4. accept + thresholds | `eval_student.py` | either | fail-closed gate: recall ≥ teacher |
 | 5. serve | `serve_student.py` + `../serve_guard_student.sh` | box | CPU, `:8005`, one forward pass |
+| 6. shadow | `shadow_test.py` | box | compare both guards; aggregate-only report, fail on any student false-allow |
 
 ```bash
 # 1. corpus  (add real coverage on ORCD: logged outputs + a public red-team set)
@@ -41,6 +42,10 @@ python -m guard_distill.eval_student --data data/guard_labeled.jsonl \
 
 # 5. serve on the box, then flip the gateway
 GUARD_STUDENT_DIR=models/guard-student ./serve_guard_student.sh   # :8005
+# Keep ShieldGemma as the gateway backend. Compare both guards on a held-out or
+# traffic-shaped JSONL without persisting its text in the report:
+python -m guard_distill.shadow_test --data data/guard_holdout.jsonl
+# Only after the offline gate and a sustained shadow bake pass:
 #   set GUARD_BACKEND=distilled in the gateway env and restart
 ```
 
@@ -49,6 +54,8 @@ GUARD_STUDENT_DIR=models/guard-student ./serve_guard_student.sh   # :8005
   gate). A false-allow for a child is far worse than a false-block.
 - **Shadow-run** the student beside ShieldGemma (log both verdicts, alert on any
   case where the student is more permissive) before removing the teacher.
+- The model artifact's `thresholds.json` is loaded by `serve_student.py` and
+  returned with scores. Missing/malformed labels or thresholds fail closed.
 - Fail-closed everywhere: an unloaded/unreachable student → `:8005` 503 →
   `DistilledGuardBackend` returns `_moderation_unavailable` → BLOCK.
 - The `HeuristicBackend` self-harm/abuse **escalation** signals stay in the

@@ -1,33 +1,13 @@
 #!/usr/bin/env python3
-"""
-auth_gateway.py — ParaFrames API gateway (DEV SCAFFOLD).
+"""Authenticated API gateway for ParaFrames model services.
 
-The one stable contract the apps code against. It sits IN FRONT of vLLM and:
-  1. authenticates the caller by a PER-USER key (not the shared vLLM key),
-  2. rate-limits per key,
-  3. enforces which MODES an audience may use,
-  4. runs the content-safety filter (screen input + output),
-  5. maps (mode, subject) -> system prompt + model, forwards to vLLM,
-  6. exposes /v1/generate for documents/slideshows.
-
-Clients NEVER see the vLLM key or hit vLLM directly. vLLM stays bound to
-localhost; only this gateway reaches it.
-
-  App ──(per-user key)──▶ auth_gateway (this) ──(server-held vLLM key)──▶ vLLM
-
-⚠️ DEV SCAFFOLD, NOT PRODUCTION. The content filter is the heuristic backend
-(content_filter.py says: do NOT ship to real minors). Per-user keys live in a
-local JSON keystore with an in-memory rate limiter. Before prod: real moderation
-model, a real key store / IdP, durable rate limiting, TLS, and COPPA/FERPA
-review. Run on the tailnet only.
-
-Run:
-  export VLLM_API_KEY=...            # the key the gateway uses to reach vLLM
-  python auth_gateway.py --tutor-url http://127.0.0.1:8000/v1 --port 8080
+The gateway enforces audience policy, plan limits, metering, and on-premise
+moderation before forwarding requests to model servers bound to localhost.
 """
 import argparse
 import base64
 import json
+import logging
 import os
 import time
 from collections import defaultdict, deque
@@ -65,6 +45,7 @@ from claude_backend import (generate as claude_generate,  # noqa: E402
                             PAID_MODEL as CLAUDE_PAID_MODEL)
 
 KEYSTORE = Path(__file__).with_name("gateway_keys.json")
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Audience -> which modes it may use. This is where the product rule lives:
@@ -422,20 +403,10 @@ CIRCUIT_URL = os.environ.get("CIRCUIT_URL", "http://127.0.0.1:8001/v1")
 EMBED_MODEL_NAME = os.environ.get("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 
 
-# --------------------------------------------------------------------------
-# Keystore + rate limiter (scaffold-grade)
-# --------------------------------------------------------------------------
-
 def load_keys() -> dict:
     if KEYSTORE.exists():
         return json.loads(KEYSTORE.read_text())
-    # seed two demo keys so the scaffold is testable out of the box
-    seed = {
-        "pk-consumer-demo": {"user": "demo-consumer", "audience": "consumer", "rpm": 30},
-        "pk-edu-demo":      {"user": "demo-edu",      "audience": "edu",      "rpm": 60},
-    }
-    KEYSTORE.write_text(json.dumps(seed, indent=2))
-    return seed
+    return {}
 
 
 def save_keys(keys: dict) -> None:
@@ -461,7 +432,7 @@ def erasure_audit(user: str, keys_removed: int, requested_by: str,
 
 
 class RateLimiter:
-    """In-memory sliding-window per key. Scaffold only — not durable."""
+    """In-memory sliding-window limiter for a single gateway process."""
     def __init__(self):
         self._hits = defaultdict(deque)
 
@@ -479,10 +450,10 @@ class RateLimiter:
 
 def build_app(tutor_url: str, tutor_key: str):
     from fastapi import FastAPI, Request, Header, HTTPException
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
     from openai import OpenAI
 
-    app = FastAPI(title="ParaFrames API Gateway (dev scaffold)")
+    app = FastAPI(title="ParaFrames API Gateway")
     tutor = OpenAI(base_url=tutor_url, api_key=tutor_key)
     # Real on-prem moderation: instant heuristic (self-harm/abuse escalation) +
     # ShieldGemma-2B per-policy classifier (nuanced block-harms). Fails closed.
@@ -893,6 +864,88 @@ def build_app(tutor_url: str, tutor_key: str):
                              "limit": max_sessions_for(rec)},
                 "usage": _usage_block(rec)}
 
+    @app.get("/v1/generated")
+    async def generated_work(kind: str | None = None,
+                             authorization: str | None = Header(None)):
+        """List the caller's generated artifacts, most recently edited first."""
+        _, rec = lookup(authorization)
+        try:
+            items = accounts.generated_artifacts_for(rec.get("user"), kind)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"items": items, "total": len(items)}
+
+    @app.get("/v1/shared")
+    async def shared_work(authorization: str | None = Header(None)):
+        """Generated artifacts other ParaFrames users shared with the caller."""
+        _, rec = lookup(authorization)
+        items = accounts.shared_artifacts_for(rec.get("user"))
+        return {"items": items, "total": len(items)}
+
+    @app.post("/v1/generated/{artifact_id}/share")
+    async def share_generated_work(artifact_id: str, request: Request,
+                                   authorization: str | None = Header(None)):
+        """Grant an existing ParaFrames user access by email."""
+        _, rec = lookup(authorization)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        email = body.get("email")
+        if not email:
+            raise HTTPException(400, "pass {'email': 'user@example.com'}")
+        try:
+            share = accounts.share_generated_artifact(
+                rec.get("user"), artifact_id, email)
+        except accounts.AccountError as e:
+            return _acct_error(e)
+        return {"shared": True, **share}
+
+    @app.delete("/v1/generated/{artifact_id}/share")
+    async def unshare_generated_work(artifact_id: str, request: Request,
+                                     authorization: str | None = Header(None)):
+        """Revoke access previously granted to an email address."""
+        _, rec = lookup(authorization)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        email = body.get("email")
+        if not email:
+            raise HTTPException(400, "pass {'email': 'user@example.com'}")
+        try:
+            revoked = accounts.revoke_generated_artifact_share(
+                rec.get("user"), artifact_id, email)
+        except accounts.AccountError as e:
+            return _acct_error(e)
+        return {"revoked": revoked, "artifact_id": artifact_id,
+                "recipient_email": str(email).strip().lower()}
+
+    @app.get("/v1/generated/{artifact_id}/content")
+    async def generated_content(artifact_id: str,
+                                authorization: str | None = Header(None)):
+        """Download or reopen one generated artifact owned by the caller."""
+        _, rec = lookup(authorization)
+        artifact = accounts.accessible_generated_artifact(
+            rec.get("user"), artifact_id)
+        # A uniform 404 prevents artifact-ID enumeration.
+        if artifact is None:
+            raise HTTPException(404, "generated artifact not found")
+        if artifact["kind"] == "spreadsheet":
+            if artifact["payload"] is None:
+                raise HTTPException(410, "spreadsheet content is no longer available")
+            return JSONResponse(artifact["payload"], media_type=(
+                artifact["content_type"] or "application/json"))
+        filename = artifact.get("filename")
+        if not filename or filename != Path(filename).name:
+            raise HTTPException(410, "generated file is no longer available")
+        path = Path(__file__).with_name("out") / filename
+        if not path.is_file():
+            raise HTTPException(410, "generated file is no longer available")
+        return FileResponse(path, media_type=(artifact.get("content_type")
+                                              or "application/octet-stream"),
+                            filename=filename)
+
     def _usage_block(rec: dict) -> dict:
         """This period's meter vs the plan's allowance."""
         u = accounts.usage_for(rec.get("user"))
@@ -1169,22 +1222,25 @@ def build_app(tutor_url: str, tutor_key: str):
         din = filt.screen_input(prompt)
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
-        # Docs/slides author ON-BOX, on the Munivar model — NOT Vertex. This is
-        # the sustainability commitment: the efficient local model does the
-        # work, web search/fetch run on-box (DuckDuckGo + httpx), so the whole
-        # loop stays on-prem and off the frontier.
-        #   web=false -> single-pass, SCHEMA-GUIDED (the grammar keystone):
-        #                the decoder is constrained to the doc/slide schema so a
-        #                small model can't emit malformed structure.
-        #   web=true  -> the agentic search/fetch loop, also on the local model.
-        # `tutor` now points at the CPU model server; it ignores the model name.
+        # Both generation modes use the local model. Single-pass generation is
+        # schema-constrained; agentic generation may search and fetch on-box.
         gen_client = tutor
         gen_model = VERSION_MODEL.get("v2", "paraclient-v2")
         gen_prompt = f"Style preferences: {style}\n\n{prompt}" if style else prompt
         try:
+            selected_theme = body.get("theme")
+            theme_source = "user" if selected_theme else "generated"
+            if kind == "slides" and not selected_theme:
+                try:
+                    selected_theme = gm.select_slideshow_theme(
+                        gen_client, gen_model, gen_prompt)
+                    theme_source = "art_director_adapter"
+                except Exception:
+                    logger.warning("slideshow theme selection failed", exc_info=True)
+                    selected_theme = None
             data = (gm.generate_agentic(gen_client, gen_model, kind, gen_prompt) if web
                     else gm.generate_guided(gen_client, gen_model, kind, gen_prompt))
-            name, theme = gm.pick_theme(data, body.get("theme"))
+            name, theme = gm.pick_theme(data, selected_theme)
             ext = "pptx" if kind == "slides" else "docx"
             out = Path("out") / f"gen-{int(time.time()*1000)}.{ext}"
             (gm.render_pptx if kind == "slides" else gm.render_docx)(data, theme, out)
@@ -1194,8 +1250,13 @@ def build_app(tutor_url: str, tutor_key: str):
         ctype = ("application/vnd.openxmlformats-officedocument."
                  + ("presentationml.presentation" if kind == "slides"
                     else "wordprocessingml.document"))
+        artifact = accounts.record_generated_artifact(
+            rec.get("user"), kind, data.get("title") or prompt,
+            filename=out.name, content_type=ctype)
         return JSONResponse({"kind": kind, "theme": name, "filename": out.name,
+                             "theme_source": theme_source,
                              "content_type": ctype, "file_base64": b,
+                             "artifact": artifact,
                              "authored_by": gen_model, "provider": "paraclient (on-prem)",
                              "on_prem": True, "web_research": web,
                              "performance": _perf_block(perf)})
@@ -1313,10 +1374,17 @@ def build_app(tutor_url: str, tutor_key: str):
             raise HTTPException(502, f"spreadsheet generation failed: {e}")
         ok, issues = spreadsheet_issues(sheet)
         values, _errs = evaluate_sheet(sheet.get("cells", []))
-        return JSONResponse({"mode": "generate", "title": sheet.get("title"),
-                             "cells": sheet.get("cells", []),
-                             "computed": values, "valid": ok, "issues": issues,
-                             "performance": _perf_block(perf)})
+        result = {"mode": "generate", "title": sheet.get("title"),
+                  "cells": sheet.get("cells", []), "computed": values,
+                  "valid": ok, "issues": issues,
+                  "performance": _perf_block(perf)}
+        artifact = accounts.record_generated_artifact(
+            rec.get("user"), "spreadsheet", sheet.get("title") or prompt,
+            content_type="application/vnd.paraframes.spreadsheet+json",
+            payload={k: result[k] for k in
+                     ("mode", "title", "cells", "computed", "valid", "issues")})
+        result["artifact"] = artifact
+        return JSONResponse(result)
 
     @app.post("/v1/civics")
     async def civics_route(request: Request,
@@ -1630,9 +1698,9 @@ def main():
 
     import uvicorn
     app = build_app(args.tutor_url, tutor_key)
-    print(f"[*] ParaFrames gateway (DEV SCAFFOLD) on {args.host}:{args.port}")
+    print(f"[*] ParaFrames gateway on {args.host}:{args.port}")
     print(f"    -> tutor {args.tutor_url}  (vLLM key held server-side)")
-    print(f"    keystore: {KEYSTORE}   safety: content_filter (heuristic)")
+    print(f"    service keystore: {KEYSTORE}   safety: on-prem moderation")
     print(f"    audiences/modes: {AUDIENCE_MODES}")
     uvicorn.run(app, host=args.host, port=args.port)
 

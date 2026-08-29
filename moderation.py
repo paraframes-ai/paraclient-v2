@@ -5,7 +5,7 @@ moderation.py — real, on-prem content-moderation backend for the safety layer.
 Replaces the heuristic scaffold in content_filter.py with a purpose-built safety
 classifier — Google's ShieldGemma-2B — served LOCALLY on CPU via llama.cpp (like
 the circuit / v2 / v3 models). Nothing leaves the box: a child's text is screened
-entirely on-prem, which is exactly why we can't use a cloud moderation API here.
+entirely on-prem rather than through a cloud moderation API.
 
 ShieldGemma is a probability classifier trained ONE POLICY AT A TIME — asking it
 about a combined policy badly under-detects (empirically P(yes)=0.02 for a racist
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 
 from content_filter import ModerationBackend
 
@@ -71,11 +72,13 @@ def _policy_prompt(text: str, surface: str, policy: str) -> str:
 class ShieldGemmaBackend(ModerationBackend):
     """On-prem ShieldGemma-2B classifier, one pass per K-12 harm policy."""
 
-    def __init__(self, url: str | None = None, timeout: float = 20.0,
+    def __init__(self, url: str | None = None, timeout: float = 90.0,
                  threshold: float | None = None):
         self.url = (url or GUARD_URL).rstrip("/")
         self.timeout = timeout
         self.threshold = GUARD_THRESHOLD if threshold is None else threshold
+        # Each screen consumes all four server slots, one per policy.
+        self._screen_lock = threading.Lock()
 
     @staticmethod
     def _p_yes(data: dict) -> float:
@@ -106,9 +109,11 @@ class ShieldGemmaBackend(ModerationBackend):
             return set()
         from concurrent.futures import ThreadPoolExecutor
         try:
-            with ThreadPoolExecutor(max_workers=len(POLICIES)) as ex:
-                scored = list(ex.map(
-                    lambda lp: (lp[0], self._score(text, surface, lp[1])), POLICIES))
+            with self._screen_lock:
+                with ThreadPoolExecutor(max_workers=len(POLICIES)) as ex:
+                    scored = list(ex.map(
+                        lambda lp: (lp[0], self._score(text, surface, lp[1])),
+                        POLICIES))
         except Exception:  # noqa: BLE001 — fail CLOSED (see module docstring)
             return {"_moderation_unavailable"}
         return {label for label, score in scored if score >= self.threshold}
@@ -147,22 +152,33 @@ class DistilledGuardBackend(ModerationBackend):
                            json={"text": text, "surface": surface},
                            timeout=self.timeout)
             r.raise_for_status()
-            scores = r.json()["scores"]        # {"sexual": p, "violence": p, ...}
+            data = r.json()
+            scores = data["scores"]        # {"sexual": p, "violence": p, ...}
+            expected = {label for label, _ in POLICIES}
+            # A partial/malformed response must never silently omit a policy.
+            if set(scores) != expected:
+                raise ValueError("distilled guard returned the wrong label set")
+            thresholds = data.get("thresholds") or {}
+            if thresholds and set(thresholds) != expected:
+                raise ValueError("distilled guard returned partial thresholds")
+            parsed_scores = {label: float(score) for label, score in scores.items()}
+            parsed_thresholds = {
+                label: float(thresholds.get(label, self.threshold))
+                for label in expected
+            }
+            if (any(not math.isfinite(v) or not 0.0 <= v <= 1.0
+                    for v in parsed_scores.values())
+                    or any(not math.isfinite(v) or not 0.0 <= v <= 1.0
+                           for v in parsed_thresholds.values())):
+                raise ValueError("distilled guard returned invalid probabilities")
         except Exception:  # noqa: BLE001 — fail CLOSED (see module docstring)
             return {"_moderation_unavailable"}
-        return {label for label, score in scores.items()
-                if float(score) >= self.threshold}
+        return {label for label, score in parsed_scores.items()
+                if score >= parsed_thresholds[label]}
 
 
 def model_backend() -> ModerationBackend:
-    """The configured neural guard backend.
-
-    GUARD_BACKEND=distilled swaps ShieldGemma for the faster distilled
-    single-pass classifier once it is trained and served on :8005; anything else
-    (the default) keeps the proven ShieldGemma-2B guard. This is the ONE switch
-    that cuts over the whole safety layer -- no gateway/content_filter changes,
-    because both backends satisfy the same classify() contract.
-    """
+    """Return the configured neural moderation backend."""
     kind = os.environ.get("GUARD_BACKEND", "shieldgemma").strip().lower()
     if kind in ("distilled", "distil", "student"):
         return DistilledGuardBackend()

@@ -30,14 +30,7 @@ from pptx.enum.text import PP_ALIGN
 import docx
 from docx.shared import Pt as DocxPt, RGBColor as DocxRGB
 
-# --------------------------------------------------------------------------
-# THEME PALETTES — the model chooses one by name based on context; the
-# renderer maps the name to concrete colors/fonts. `dark` flags a dark bg so
-# the renderer uses light body text.
-# --------------------------------------------------------------------------
-# Monochrome only — every theme is pure grayscale (R=G=B). Themes vary by
-# shade/contrast/typeface, never by hue, so documents stay strictly black/white.
-THEMES = {
+DOC_THEMES = {
     "light":     dict(bg="FFFFFF", title="111111", body="333333", accent="666666",
                       font_head="Georgia", font_body="Calibri", dark=False),
     "slate":     dict(bg="F2F2F2", title="1A1A1A", body="3A3A3A", accent="707070",
@@ -49,21 +42,75 @@ THEMES = {
     "dark":      dict(bg="121212", title="FFFFFF", body="D0D0D0", accent="8A8A8A",
                       font_head="Segoe UI", font_body="Segoe UI", dark=True),
 }
-DEFAULT_THEME = "light"
 
-# --------------------------------------------------------------------------
-# Generation
-# --------------------------------------------------------------------------
+SLIDE_THEMES = {
+    "academic": dict(bg="F7F3E8", bg_alt="E9EEF5", title="172A46", body="26364A",
+                     accent="B8860B", accent2="315A8A", font_head="Aptos Display",
+                     font_body="Aptos", layout="frame", dark=False),
+    "playful": dict(bg="FFF7E6", bg_alt="EAF7FF", title="55286F", body="34304A",
+                    accent="FF6B6B", accent2="2EC4B6", font_head="Aptos Display",
+                    font_body="Aptos", layout="blocks", dark=False),
+    "corporate": dict(bg="F7F9FC", bg_alt="EDF2F8", title="102A43", body="334E68",
+                      accent="1677FF", accent2="00A3A3", font_head="Aptos Display",
+                      font_body="Aptos", layout="band", dark=False),
+    "nature": dict(bg="F3F7EE", bg_alt="E3EFE0", title="214E34", body="35543F",
+                   accent="4C956C", accent2="D68C45", font_head="Georgia",
+                   font_body="Aptos", layout="organic", dark=False),
+    "tech": dict(bg="101827", bg_alt="172238", title="F4F7FF", body="D4DCEF",
+                 accent="38BDF8", accent2="A78BFA", font_head="Aptos Display",
+                 font_body="Aptos", layout="tech", dark=True),
+}
 
-def _theme_guidance() -> str:
-    hints = {
+THEMES = {**DOC_THEMES, **SLIDE_THEMES}
+DEFAULT_DOC_THEME = "light"
+DEFAULT_SLIDE_THEME = "corporate"
+
+def _theme_guidance(kind: str) -> str:
+    hints = ({
         "academic": "scholarly / formal / older students",
         "playful": "young children (K-5), fun, colorful",
         "corporate": "business, professional, neutral default",
         "nature": "science, environment, biology, outdoors",
         "tech": "computing, engineering, coding (dark palette)",
-    }
+    } if kind == "slides" else {
+        "light": "clean general-purpose document",
+        "slate": "modern neutral report",
+        "newsprint": "editorial or humanities writing",
+        "contrast": "high-contrast formal handout",
+        "dark": "dark-background digital document",
+    })
     return "; ".join(f'"{k}" = {v}' for k, v in hints.items())
+
+
+THEME_SELECTOR_SYS = (
+    "You are ParaFrames' slideshow art director. Choose the single visual theme "
+    "that best fits the topic, audience, purpose, and requested tone. Return "
+    "STRICT JSON only as {\"theme\":\"<name>\"}. Valid themes: "
+    + ", ".join(SLIDE_THEMES) + ". Guidance: " + _theme_guidance("slides") + "."
+)
+
+
+def theme_selector_messages(user_prompt: str) -> list:
+    """Build the slideshow-theme adapter input."""
+    return [{"role": "system", "content": THEME_SELECTOR_SYS},
+            {"role": "user", "content": user_prompt}]
+
+
+def select_slideshow_theme(client, model: str, user_prompt: str) -> str:
+    """Choose a renderer-backed theme with the request-scoped LoRA."""
+    response = client.chat.completions.create(
+        model=model,
+        messages=theme_selector_messages(user_prompt),
+        max_tokens=20,
+        temperature=0,
+        extra_body={"lora": [{"id": 0, "scale": 1.0}]},
+    )
+    raw = response.choices[0].message.content or ""
+    data = json.loads(raw)
+    theme = data.get("theme")
+    if theme not in SLIDE_THEMES:
+        raise ValueError(f"invalid slideshow theme: {theme!r}")
+    return theme
 
 
 _MATH_NOTE = (
@@ -77,26 +124,26 @@ def build_prompt(kind: str, user_prompt: str) -> list:
     if kind == "slides":
         schema = (
             '{"title": "...", "subtitle": "...", "theme": "<one of: '
-            + ", ".join(THEMES) + '>", "slides": [{"title": "...", '
+            + ", ".join(SLIDE_THEMES) + '>", "slides": [{"title": "...", '
             '"bullets": ["...", "..."], "notes": "..."}]}'
         )
         sys = (
             "You are a presentation generator. Return STRICT JSON only (no prose, "
             "no markdown fences) matching exactly:\n" + schema + "\n"
             "Choose the SINGLE most appropriate theme for the topic and audience — "
-            f"{_theme_guidance()}. 4-10 slides, 2-5 short bullets each; `notes` is "
+            f"{_theme_guidance(kind)}. 4-10 slides, 2-5 short bullets each; `notes` is "
             "optional speaker notes. Keep it accurate and age-appropriate. " + _MATH_NOTE
         )
     else:  # doc
         schema = (
-            '{"title": "...", "theme": "<one of: ' + ", ".join(THEMES) + '>", '
+            '{"title": "...", "theme": "<one of: ' + ", ".join(DOC_THEMES) + '>", '
             '"sections": [{"heading": "...", "paragraphs": ["...", "..."]}]}'
         )
         sys = (
             "You are a document generator. Return STRICT JSON only (no prose, no "
             "markdown fences) matching exactly:\n" + schema + "\n"
             "Choose the SINGLE most appropriate theme for the topic and audience — "
-            f"{_theme_guidance()}. Use clear headings and well-formed paragraphs. "
+            f"{_theme_guidance(kind)}. Use clear headings and well-formed paragraphs. "
             "Keep it accurate and age-appropriate. " + _MATH_NOTE
         )
     return [{"role": "system", "content": sys},
@@ -167,7 +214,7 @@ def generate(client, model, kind, user_prompt, retries=3):
 
 
 # --------------------------------------------------------------------------
-# Grammar / schema-guided generation (Project Munivar keystone).
+# Grammar-constrained generation.
 #
 # The whole point of the efficient on-box generator: a SMALL model doesn't have
 # to be smart enough to emit perfect JSON by luck — the decoder is CONSTRAINED
@@ -184,8 +231,8 @@ def generate(client, model, kind, user_prompt, retries=3):
 
 def guided_schema(kind: str) -> dict:
     """JSON Schema the on-box generator is constrained to. Theme enum is derived
-    from THEMES so it never drifts from the renderer."""
-    themes = sorted(THEMES)
+    from the relevant palette so it never drifts from the renderer."""
+    themes = sorted(SLIDE_THEMES if kind == "slides" else DOC_THEMES)
     if kind == "slides":
         return {
             "type": "object", "additionalProperties": False,
@@ -413,10 +460,12 @@ def generate_agentic(client, model, kind, user_prompt, max_steps=6, min_research
 
 
 def pick_theme(data: dict, override: str | None) -> dict:
-    name = override or data.get("theme") or DEFAULT_THEME
-    if name not in THEMES:
-        name = DEFAULT_THEME
-    return name, THEMES[name]
+    palettes = SLIDE_THEMES if "slides" in data else DOC_THEMES
+    default = DEFAULT_SLIDE_THEME if "slides" in data else DEFAULT_DOC_THEME
+    name = override or data.get("theme") or default
+    if name not in palettes:
+        name = default
+    return name, palettes[name]
 
 
 # --------------------------------------------------------------------------
@@ -433,9 +482,16 @@ def render_pptx(data: dict, theme: dict, out: Path):
     prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
 
-    def bg(slide):
+    def bg(slide, color=None):
         f = slide.background.fill
-        f.solid(); f.fore_color.rgb = _rgb(theme["bg"])
+        f.solid(); f.fore_color.rgb = _rgb(color or theme["bg"])
+
+    def rect(slide, left, top, width, height, color):
+        shape = slide.shapes.add_shape(
+            1, Inches(left), Inches(top), Inches(width), Inches(height))
+        shape.fill.solid(); shape.fill.fore_color.rgb = _rgb(color)
+        shape.line.fill.background()
+        return shape
 
     def textbox(slide, left, top, width, height):
         tb = slide.shapes.add_textbox(Inches(left), Inches(top),
@@ -445,6 +501,11 @@ def render_pptx(data: dict, theme: dict, out: Path):
 
     # ---- title slide ----
     s = prs.slides.add_slide(blank); bg(s)
+    rect(s, 0, 0, 13.333, 0.18, theme["accent"])
+    rect(s, 0, 7.32, 13.333, 0.18, theme.get("accent2", theme["accent"]))
+    if theme.get("layout") in ("blocks", "tech"):
+        rect(s, 11.6, 0.18, 1.73, 0.48, theme.get("accent2", theme["accent"]))
+        rect(s, 0, 6.84, 1.73, 0.48, theme["accent"])
     tf = textbox(s, 1, 2.4, 11.3, 2)
     p = tf.paragraphs[0]; p.alignment = PP_ALIGN.CENTER
     run = p.add_run(); run.text = data.get("title", "Untitled")
@@ -457,11 +518,29 @@ def render_pptx(data: dict, theme: dict, out: Path):
         r2.font.color.rgb = _rgb(theme["accent"])
 
     # ---- content slides ----
-    for slide in data.get("slides", []):
-        s = prs.slides.add_slide(blank); bg(s)
+    for index, slide in enumerate(data.get("slides", []), start=1):
+        s = prs.slides.add_slide(blank)
+        bg(s, theme.get("bg_alt") if index % 2 == 0 else theme["bg"])
+        layout = theme.get("layout", "band")
+        accent2 = theme.get("accent2", theme["accent"])
+        if layout == "band":
+            rect(s, 0, 0, 0.18, 7.5, theme["accent"])
+        elif layout == "blocks":
+            rect(s, 0, 0, 1.55, 0.22, theme["accent"])
+            rect(s, 11.78, 7.28, 1.55, 0.22, accent2)
+        elif layout == "frame":
+            rect(s, 0, 0, 0.12, 7.5, theme["accent"])
+            rect(s, 0, 7.38, 13.333, 0.12, accent2)
+        elif layout == "organic":
+            rect(s, 0, 0, 13.333, 0.12, theme["accent"])
+            rect(s, 12.98, 0, 0.35, 7.5, accent2)
+        elif layout == "tech":
+            rect(s, 0, 0, 13.333, 0.12, theme["accent"])
+            rect(s, 13.21, 0, 0.12, 7.5, accent2)
         # accent bar under the title
         bar = s.shapes.add_shape(1, Inches(0.8), Inches(1.35), Inches(3.2), Pt(4))
-        bar.fill.solid(); bar.fill.fore_color.rgb = _rgb(theme["accent"])
+        bar.fill.solid(); bar.fill.fore_color.rgb = _rgb(
+            accent2 if index % 2 == 0 else theme["accent"])
         bar.line.fill.background()
         ttf = textbox(s, 0.8, 0.5, 11.7, 1)
         tp = ttf.paragraphs[0]; tr = tp.add_run()
@@ -476,6 +555,11 @@ def render_pptx(data: dict, theme: dict, out: Path):
             r.font.size = Pt(20); r.font.name = theme["font_body"]
             r.font.color.rgb = _rgb(theme["body"])
             p.space_after = Pt(10)
+        ntf = textbox(s, 11.9, 6.85, 0.6, 0.35)
+        np = ntf.paragraphs[0]; np.alignment = PP_ALIGN.RIGHT
+        nr = np.add_run(); nr.text = str(index)
+        nr.font.size = Pt(10); nr.font.name = theme["font_body"]
+        nr.font.color.rgb = _rgb(accent2)
         if slide.get("notes"):
             s.notes_slide.notes_text_frame.text = str(slide["notes"])
 

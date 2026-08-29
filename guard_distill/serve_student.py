@@ -31,7 +31,8 @@ MODEL_DIR = os.environ.get("GUARD_STUDENT_DIR", "models/guard-student")
 THREADS = int(os.environ.get("GUARD_STUDENT_THREADS", "2"))
 
 app = FastAPI(title="ParaFrames distilled guard")
-_state: dict = {"tok": None, "model": None, "labels": LABELS, "err": None}
+_state: dict = {"tok": None, "model": None, "labels": LABELS,
+                "thresholds": None, "err": None}
 
 
 class Req(BaseModel):
@@ -54,8 +55,18 @@ def _load():
         lp = Path(MODEL_DIR) / "labels.json"
         if lp.exists():
             _state["labels"] = json.loads(lp.read_text())
+        tp = Path(MODEL_DIR) / "thresholds.json"
+        if tp.exists():
+            thresholds = json.loads(tp.read_text())
+            if set(thresholds) != set(_state["labels"]):
+                raise ValueError("thresholds.json must contain every model label")
+            thresholds = {label: float(thresholds[label])
+                          for label in _state["labels"]}
+            if any(not 0.0 <= value <= 1.0 for value in thresholds.values()):
+                raise ValueError("thresholds.json values must be between 0 and 1")
+            _state["thresholds"] = thresholds
         print(f"[guard-student] loaded {MODEL_DIR} labels={_state['labels']} "
-              f"threads={THREADS}")
+              f"thresholds={_state['thresholds']} threads={THREADS}")
     except Exception as e:  # noqa: BLE001
         _state["err"] = str(e)
         print(f"[guard-student] MODEL NOT LOADED ({e}). /classify will 503 so the "
@@ -65,7 +76,8 @@ def _load():
 @app.get("/health")
 def health():
     return {"ok": _state["model"] is not None, "model_dir": MODEL_DIR,
-            "labels": _state["labels"], "error": _state["err"]}
+            "labels": _state["labels"], "thresholds": _state["thresholds"],
+            "error": _state["err"]}
 
 
 @app.post("/classify")
@@ -80,5 +92,8 @@ def classify(req: Req):
     with torch.no_grad():
         logits = _state["model"](**enc).logits[0]
         probs = torch.sigmoid(logits).tolist()
-    return {"scores": {lab: round(float(p), 6)
-                       for lab, p in zip(_state["labels"], probs)}}
+    result = {"scores": {lab: round(float(p), 6)
+                         for lab, p in zip(_state["labels"], probs)}}
+    if _state["thresholds"] is not None:
+        result["thresholds"] = _state["thresholds"]
+    return result

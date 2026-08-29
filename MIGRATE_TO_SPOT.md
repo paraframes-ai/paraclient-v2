@@ -1,9 +1,9 @@
-# Migrating the L4 box to g2-standard-4 Spot (and keeping this Claude session)
+# Migrating the L4 box to g2-standard-4 Spot
 
 Goal: same box, cheaper. `g2-standard-8` (on-demand, ~$640/mo at 24/7) →
 `g2-standard-4` **Spot** (~$150–175/mo at 24/7). Reuse the existing boot disk so
-nothing is copied and everything — models, adapters, venvs, secrets,
-accounts.db, tailscale state, and the Claude session history — comes along.
+nothing is copied; models, adapters, environments, secrets, account data, and
+Tailscale state remain on the existing disk.
 
 ## Why it's a recreate, not an edit
 You can change an instance's machine type in place, but you CANNOT flip an
@@ -22,8 +22,7 @@ v4 (GPU) + v2 (7B CPU) + guard + gateway. Measured fit on 16 GB: ~14.5 GB used,
 with the 8 GB swap as the cushion. If v2 ever causes memory pressure, disable it
 too (`sudo systemctl disable --now paraclient-v2`) and you're at ~11 GB.
 
-## The cutover (run these yourself — the box's service account can't, and
-## stopping this VM ends the current Claude session)
+## Cutover
 
 Facts you'll need:  project `paraframes-app`, zone `us-east1-b`,
 instance `paraclient-l4`, boot disk device `persistent-disk-0`
@@ -53,28 +52,19 @@ gcloud compute instances create paraclient-l4 \
   --maintenance-policy=TERMINATE
 ```
 
-## Get this Claude session back on the new box
-The session history lives on the moved disk. After the VM is up:
-```bash
-ssh <new box, via tailnet or GCP internal IP>
-cd ~/paraclient-v2
-~/.local/bin/claude --resume        # pick session f2e43576… (this conversation)
-```
-
 ## Verify after boot
 ```bash
 nvidia-smi                                   # L4 present
 free -h                                      # swap active
 systemctl is-active paraclient-vllm paraclient-v2 paraclient-guard paraclient-gateway
 systemctl is-enabled paraclient-v3           # should say: disabled
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz  # via tailnet IP
+curl -s -o /dev/null -w '%{http_code}\n' http://100.122.196.7:8080/healthz
 ```
 
 ## Preemption note (Spot)
 A Spot VM does not auto-restart when Google reclaims it — it STOPs. For a
 stateful box like this, that's the right behavior (no data loss); just start it
-again. A tiny watchdog on the always-on e2 box can auto-`start` it if you want
-hands-off recovery — ask and it can be added.
+again. The watchdog on the always-on e2 box can start it automatically.
 
 ## Post-migration fixes applied on the new box (2026-08-09)
 The recreate was the box's first reboot in ~19 days and surfaced latent issues:

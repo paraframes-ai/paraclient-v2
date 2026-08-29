@@ -18,8 +18,84 @@ full model. vLLM serves it with --enable-lora.
 """
 import argparse
 import glob
+import hashlib
 import inspect
+import json
+import platform
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
 import torch
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
+
+
+def _loss_curve(log_history: list[dict]) -> str:
+    points = [(float(row["step"]), float(row["loss"])) for row in log_history
+              if "step" in row and "loss" in row]
+    width, height, margin = 800, 420, 55
+    if not points:
+        return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+                f'height="{height}"><text x="{margin}" y="{margin}" '
+                'font-family="sans-serif">No logged loss points</text></svg>')
+    x_max = max(x for x, _ in points) or 1.0
+    y_min = min(y for _, y in points)
+    y_max = max(y for _, y in points)
+    y_span = y_max - y_min or 1.0
+    coords = " ".join(
+        f"{margin + x / x_max * (width - 2 * margin):.1f},"
+        f"{height - margin - (y - y_min) / y_span * (height - 2 * margin):.1f}"
+        for x, y in points)
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+<rect width="100%" height="100%" fill="white"/>
+<line x1="{margin}" y1="{height-margin}" x2="{width-margin}" y2="{height-margin}" stroke="#444"/>
+<line x1="{margin}" y1="{margin}" x2="{margin}" y2="{height-margin}" stroke="#444"/>
+<polyline fill="none" stroke="#1677ff" stroke-width="3" points="{coords}"/>
+<text x="{width/2}" y="{height-12}" text-anchor="middle" font-family="sans-serif">Training step</text>
+<text x="18" y="{height/2}" text-anchor="middle" transform="rotate(-90 18 {height/2})" font-family="sans-serif">Loss</text>
+<text x="{margin}" y="30" font-family="sans-serif">Training loss</text>
+</svg>'''
+
+
+def _write_training_artifacts(out: Path, args, trainer, metrics: dict) -> None:
+    data_path = Path(args.data)
+    manifest = {
+        "subject": args.subject,
+        "base_model": args.base,
+        "requested_revision": args.revision,
+        "resolved_revision": getattr(trainer.model.config, "_commit_hash", None),
+        "dataset": str(data_path),
+        "dataset_sha256": hashlib.sha256(data_path.read_bytes()).hexdigest(),
+        "hyperparameters": {
+            "epochs": args.epochs,
+            "learning_rate": args.lr,
+            "batch_size": args.batch_size,
+            "gradient_accumulation": args.grad_accum,
+            "max_sequence_length": args.max_seq_len,
+            "lora_rank": args.rank,
+            "lora_alpha": args.alpha,
+            "lora_dropout": 0.05,
+        },
+        "metrics": metrics,
+        "runtime": {
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "transformers": _package_version("transformers"),
+            "trl": _package_version("trl"),
+            "peft": _package_version("peft"),
+            "datasets": _package_version("datasets"),
+        },
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "training_run.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    trainer.state.save_to_json(str(out / "trainer_state.json"))
+    (out / "loss_curve.svg").write_text(_loss_curve(trainer.state.log_history))
 
 
 def main():
@@ -27,6 +103,7 @@ def main():
     ap.add_argument("--subject", required=True)
     ap.add_argument("--data", required=True, help="path to <subject>.jsonl")
     ap.add_argument("--base", default="Qwen/Qwen2.5-7B-Instruct")
+    ap.add_argument("--revision", default="main")
     ap.add_argument("--out-dir", default="adapters")
     ap.add_argument("--epochs", type=float, default=3.0)
     ap.add_argument("--lr", type=float, default=2e-4)
@@ -61,7 +138,7 @@ def main():
         bnb_4bit_use_double_quant=True,
     )
 
-    tok = AutoTokenizer.from_pretrained(args.base)
+    tok = AutoTokenizer.from_pretrained(args.base, revision=args.revision)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
@@ -73,7 +150,8 @@ def main():
     if not args.no_flash_attn:
         model_kwargs["attn_implementation"] = "flash_attention_2"
 
-    model = AutoModelForCausalLM.from_pretrained(args.base, **model_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base, revision=args.revision, **model_kwargs)
     model.config.use_cache = False  # required with gradient checkpointing
 
     lora = LoraConfig(
@@ -146,9 +224,11 @@ def main():
     # Resume from the latest checkpoint if one exists (so a preempted/requeued
     # job on the preemptable partition continues instead of restarting at step 0).
     _ckpts = glob.glob(f"{args.out_dir}/{args.subject}/checkpoint-*")
-    trainer.train(resume_from_checkpoint=bool(_ckpts))
-    trainer.save_model(f"{args.out_dir}/{args.subject}")
-    print(f"[✓] Saved LoRA adapter -> {args.out_dir}/{args.subject}")
+    result = trainer.train(resume_from_checkpoint=bool(_ckpts))
+    out = Path(args.out_dir) / args.subject
+    trainer.save_model(out)
+    _write_training_artifacts(out, args, trainer, result.metrics)
+    print(f"[✓] Saved LoRA adapter -> {out}")
 
 
 if __name__ == "__main__":

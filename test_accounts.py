@@ -416,6 +416,71 @@ rrec = accounts.record_for_key(res["api_key"])
 check("record_for_key resolves a research account",
       rrec and rrec["tier"] == "research" and rrec["audience"] == "research", str(rrec))
 
+print("\n=== generated work index ===")
+doc_art = accounts.record_generated_artifact(
+    con["user"], "doc", "Book report", filename="gen-1.docx",
+    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+sheet_art = accounts.record_generated_artifact(
+    con["user"], "spreadsheet", "Science data",
+    content_type="application/vnd.paraframes.spreadsheet+json",
+    payload={"cells": [{"ref": "A1", "value": 42}]})
+# Make the doc the most recently edited item without relying on clock sleeps.
+with accounts._connect() as db:
+    db.execute("UPDATE generated_artifacts SET updated_at=updated_at+10 "
+               "WHERE artifact_id=?", (doc_art["id"],))
+generated = accounts.generated_artifacts_for(con["user"])
+check("generated work is newest-first",
+      [item["id"] for item in generated] == [doc_art["id"], sheet_art["id"]],
+      str(generated))
+check("generated work is scoped by kind",
+      [item["id"] for item in
+       accounts.generated_artifacts_for(con["user"], "spreadsheet")]
+      == [sheet_art["id"]])
+check("generated listing does not expose spreadsheet payload",
+      all("payload" not in item for item in generated))
+loaded_sheet = accounts.generated_artifact_for(con["user"], sheet_art["id"])
+check("generated spreadsheet content can be reopened",
+      loaded_sheet and loaded_sheet["payload"]["cells"][0]["value"] == 42)
+check("generated content is owner-scoped",
+      accounts.generated_artifact_for(dev["user"], sheet_art["id"]) is None)
+check("unshared artifact is inaccessible to another user",
+      accounts.accessible_generated_artifact(dev["user"], sheet_art["id"]) is None)
+share = accounts.share_generated_artifact(
+    con["user"], sheet_art["id"], "Alice@Research.ParaFrames.org ")
+check("artifact can be shared by recipient email",
+      share["recipient_email"] == "alice@research.paraframes.org")
+shared = accounts.shared_artifacts_for(dev["user"])
+check("recipient sees shared artifact",
+      len(shared) == 1 and shared[0]["id"] == sheet_art["id"])
+check("recipient can reopen shared content",
+      accounts.accessible_generated_artifact(
+          dev["user"], sheet_art["id"])["payload"]["cells"][0]["value"] == 42)
+# Re-sharing is idempotent and must not duplicate the recipient's dashboard.
+accounts.share_generated_artifact(
+    con["user"], sheet_art["id"], "alice@research.paraframes.org")
+check("sharing twice does not duplicate an artifact",
+      len(accounts.shared_artifacts_for(dev["user"])) == 1)
+revoked = accounts.revoke_generated_artifact_share(
+    con["user"], sheet_art["id"], "alice@research.paraframes.org")
+check("owner can revoke shared access", revoked and
+      accounts.accessible_generated_artifact(dev["user"], sheet_art["id"]) is None)
+accounts.share_generated_artifact(
+    con["user"], sheet_art["id"], "alice@research.paraframes.org")
+try:
+    accounts.generated_artifacts_for(con["user"], "video")
+    check("unknown generated-work kind is rejected", False)
+except ValueError:
+    check("unknown generated-work kind is rejected", True)
+accounts.delete_account(con["user"])
+with accounts._connect() as db:
+    left = db.execute(
+        "SELECT COUNT(*) c FROM generated_artifacts WHERE user_id=?",
+        (con["user"],)).fetchone()["c"]
+check("account deletion erases generated-work index", left == 0, f"{left} left")
+check("owner deletion revokes all shared access",
+      not accounts.shared_artifacts_for(dev["user"]) and
+      accounts.accessible_generated_artifact(dev["user"], sheet_art["id"]) is None)
+
 print(f"\n{'='*54}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("  FAILED: " + ", ".join(FAIL))

@@ -56,7 +56,8 @@ tutoring; external LLM providers are used **only** on the paid consumer lane and
    named-delete (the under-13 takedown path). **Still to do:** (a) implement the
    e2 side — the KL embeddings + account record live on e2, so wire `KL_DELETE_URL`
    to a real e2 purge endpoint; (b) define concrete retention windows for #6/#8.
-3. **Access control / audit.** Per-user keys are a static JSON keystore; there's
-   no per-access audit trail (FERPA expects one). *(Offered as a follow-on build.)*
+3. **Access control / audit.** User keys are hashed in SQLite; a legacy JSON
+   keystore remains for internal service credentials. Per-access audit logging
+   is not yet implemented.
 4. **Encryption at rest.** Transit is WireGuard-encrypted; confirm `<FILL: disk
    encryption on the L4 / e2 volumes and the e2 embedding store>`.

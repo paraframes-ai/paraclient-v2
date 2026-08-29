@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the ParaFrames API gateway (DEV SCAFFOLD): auth + safety filter +
+# Launch the ParaFrames API gateway: authentication, safety, and
 # mode/subject routing + docs/slides, in front of the vLLM tutor.
 #
 # CPU-only — it forwards to vLLM on localhost:8000, so it runs alongside the

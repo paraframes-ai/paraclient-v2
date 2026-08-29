@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -175,6 +176,29 @@ def init_db() -> None:
             last_seen  REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+        -- No account FK: legacy keystore users may own generated artifacts.
+        CREATE TABLE IF NOT EXISTS generated_artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            title       TEXT NOT NULL,
+            filename    TEXT,
+            content_type TEXT,
+            payload_json TEXT,
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_generated_artifacts_user_updated
+            ON generated_artifacts(user_id, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS artifact_shares (
+            artifact_id     TEXT NOT NULL,
+            owner_user_id   TEXT NOT NULL,
+            recipient_user_id TEXT NOT NULL,
+            shared_at       REAL NOT NULL,
+            PRIMARY KEY (artifact_id, recipient_user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_artifact_shares_recipient
+            ON artifact_shares(recipient_user_id, shared_at DESC);
         """)
         # Migrate older DBs created before the OAuth/team columns existed.
         cols = {r["name"] for r in con.execute("PRAGMA table_info(accounts)")}
@@ -552,6 +576,167 @@ def reset_usage(user_id: str) -> None:
                     (user_id, current_period()))
 
 
+GENERATED_KINDS = {"slides", "doc", "spreadsheet"}
+
+
+def record_generated_artifact(user_id: str, kind: str, title: str, *,
+                              filename: str | None = None,
+                              content_type: str | None = None,
+                              payload: dict | None = None) -> dict:
+    """Index a successfully generated user artifact and return its metadata."""
+    if not user_id:
+        raise ValueError("user_id is required")
+    if kind not in GENERATED_KINDS:
+        raise ValueError(f"unsupported generated artifact kind: {kind}")
+    artifact_id = "a_" + secrets.token_urlsafe(18)
+    now = time.time()
+    clean_title = (title or "Untitled").strip()[:300] or "Untitled"
+    payload_json = (json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                    if payload is not None else None)
+    with _connect() as con:
+        con.execute(
+            "INSERT INTO generated_artifacts(artifact_id,user_id,kind,title,"
+            "filename,content_type,payload_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (artifact_id, user_id, kind, clean_title, filename, content_type,
+             payload_json, now, now))
+    return {"id": artifact_id, "kind": kind, "title": clean_title,
+            "filename": filename, "content_type": content_type,
+            "created_at": now, "updated_at": now}
+
+
+def generated_artifacts_for(user_id: str, kind: str | None = None) -> list[dict]:
+    """All of a user's generated work, most recently updated first."""
+    if kind is not None and kind not in GENERATED_KINDS:
+        raise ValueError(f"unsupported generated artifact kind: {kind}")
+    sql = ("SELECT artifact_id,kind,title,filename,content_type,created_at,updated_at "
+           "FROM generated_artifacts WHERE user_id=?")
+    params: tuple = (user_id,)
+    if kind is not None:
+        sql += " AND kind=?"
+        params += (kind,)
+    sql += " ORDER BY updated_at DESC, created_at DESC, artifact_id DESC"
+    with _connect() as con:
+        rows = con.execute(sql, params).fetchall()
+    return [{"id": row["artifact_id"], "kind": row["kind"],
+             "title": row["title"], "filename": row["filename"],
+             "content_type": row["content_type"],
+             "created_at": row["created_at"], "updated_at": row["updated_at"]}
+            for row in rows]
+
+
+def generated_artifact_for(user_id: str, artifact_id: str) -> dict | None:
+    """Return one artifact including its reopen payload, scoped to its owner."""
+    with _connect() as con:
+        row = con.execute(
+            "SELECT artifact_id,kind,title,filename,content_type,payload_json,"
+            "created_at,updated_at FROM generated_artifacts "
+            "WHERE user_id=? AND artifact_id=?", (user_id, artifact_id)).fetchone()
+    if not row:
+        return None
+    return {"id": row["artifact_id"], "kind": row["kind"],
+            "title": row["title"], "filename": row["filename"],
+            "content_type": row["content_type"],
+            "payload": (json.loads(row["payload_json"])
+                        if row["payload_json"] is not None else None),
+            "created_at": row["created_at"], "updated_at": row["updated_at"]}
+
+
+def share_generated_artifact(owner_user_id: str, artifact_id: str,
+                             recipient_email: str) -> dict:
+    """Share an owned artifact with an existing active user, idempotently."""
+    email = _normalize_email(recipient_email)
+    with _connect() as con:
+        artifact = con.execute(
+            "SELECT artifact_id FROM generated_artifacts "
+            "WHERE artifact_id=? AND user_id=?",
+            (artifact_id, owner_user_id)).fetchone()
+        if not artifact:
+            raise AccountError(404, "generated artifact not found")
+        recipient = con.execute(
+            "SELECT user_id FROM accounts WHERE email=? AND status='active'",
+            (email,)).fetchone()
+        if not recipient:
+            raise AccountError(404, "no active ParaFrames user has that email")
+        recipient_user_id = recipient["user_id"]
+        if recipient_user_id == owner_user_id:
+            raise AccountError(400, "you already own this artifact")
+        now = time.time()
+        con.execute(
+            "INSERT INTO artifact_shares(artifact_id,owner_user_id,"
+            "recipient_user_id,shared_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(artifact_id,recipient_user_id) DO UPDATE SET "
+            "shared_at=excluded.shared_at",
+            (artifact_id, owner_user_id, recipient_user_id, now))
+    return {"artifact_id": artifact_id, "recipient_email": email,
+            "shared_at": now}
+
+
+def revoke_generated_artifact_share(owner_user_id: str, artifact_id: str,
+                                    recipient_email: str) -> bool:
+    """Remove one recipient's access. Only the artifact owner may do this."""
+    email = _normalize_email(recipient_email)
+    with _connect() as con:
+        artifact = con.execute(
+            "SELECT 1 FROM generated_artifacts WHERE artifact_id=? AND user_id=?",
+            (artifact_id, owner_user_id)).fetchone()
+        if not artifact:
+            raise AccountError(404, "generated artifact not found")
+        recipient = con.execute("SELECT user_id FROM accounts WHERE email=?",
+                                (email,)).fetchone()
+        if not recipient:
+            return False
+        cur = con.execute(
+            "DELETE FROM artifact_shares WHERE artifact_id=? "
+            "AND owner_user_id=? AND recipient_user_id=?",
+            (artifact_id, owner_user_id, recipient["user_id"]))
+    return cur.rowcount > 0
+
+
+def shared_artifacts_for(recipient_user_id: str) -> list[dict]:
+    """Artifacts shared with a user, newest share first."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT g.artifact_id,g.kind,g.title,g.filename,g.content_type,"
+            "g.created_at,g.updated_at,s.shared_at,a.email owner_email "
+            "FROM artifact_shares s "
+            "JOIN generated_artifacts g ON g.artifact_id=s.artifact_id "
+            "LEFT JOIN accounts a ON a.user_id=s.owner_user_id "
+            "WHERE s.recipient_user_id=? "
+            "AND (a.user_id IS NULL OR a.status='active') "
+            "ORDER BY s.shared_at DESC,g.updated_at DESC,g.artifact_id DESC",
+            (recipient_user_id,)).fetchall()
+    return [{"id": row["artifact_id"], "kind": row["kind"],
+             "title": row["title"], "filename": row["filename"],
+             "content_type": row["content_type"],
+             "created_at": row["created_at"], "updated_at": row["updated_at"],
+             "shared_at": row["shared_at"], "owner_email": row["owner_email"]}
+            for row in rows]
+
+
+def accessible_generated_artifact(user_id: str, artifact_id: str) -> dict | None:
+    """Return content when the caller owns the artifact or has an active share."""
+    with _connect() as con:
+        row = con.execute(
+            "SELECT DISTINCT g.artifact_id,g.kind,g.title,g.filename,g.content_type,"
+            "g.payload_json,g.created_at,g.updated_at,g.user_id owner_user_id "
+            "FROM generated_artifacts g LEFT JOIN artifact_shares s "
+            "ON s.artifact_id=g.artifact_id LEFT JOIN accounts owner "
+            "ON owner.user_id=g.user_id WHERE g.artifact_id=? AND "
+            "(g.user_id=? OR (s.recipient_user_id=? AND "
+            "(owner.user_id IS NULL OR owner.status='active')))",
+            (artifact_id, user_id, user_id)).fetchone()
+    if not row:
+        return None
+    return {"id": row["artifact_id"], "kind": row["kind"],
+            "title": row["title"], "filename": row["filename"],
+            "content_type": row["content_type"],
+            "payload": (json.loads(row["payload_json"])
+                        if row["payload_json"] is not None else None),
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+            "owner_user_id": row["owner_user_id"]}
+
+
 # --------------------------------------------------------------------------
 # Concurrent sessions
 # --------------------------------------------------------------------------
@@ -646,15 +831,30 @@ def set_status(user_id: str, status: str) -> bool:
 def delete_account(user_id: str) -> int:
     """Erase the account and its keys. Returns the number of keys removed.
     Used by /v1/account/delete (right-to-erasure + under-13 takedown)."""
+    generated_files: list[str] = []
     with _connect() as con:
         n = con.execute("SELECT COUNT(*) c FROM api_keys WHERE user_id=?",
                         (user_id,)).fetchone()["c"]
+        generated_files = [row["filename"] for row in con.execute(
+            "SELECT filename FROM generated_artifacts "
+            "WHERE user_id=? AND filename IS NOT NULL", (user_id,))]
         con.execute("DELETE FROM api_keys WHERE user_id=?", (user_id,))
         con.execute("DELETE FROM accounts WHERE user_id=?", (user_id,))
         # Usage and session rows are keyed by user_id, not FK-cascaded — erase
         # them too, or deletion would leave per-user records behind.
         con.execute("DELETE FROM usage WHERE user_id=?", (user_id,))
         con.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        con.execute("DELETE FROM artifact_shares WHERE owner_user_id=? "
+                    "OR recipient_user_id=?", (user_id, user_id))
+        con.execute("DELETE FROM generated_artifacts WHERE user_id=?", (user_id,))
+    out_dir = Path(__file__).with_name("out")
+    for filename in generated_files:
+        # Treat persisted filenames as untrusted input.
+        if filename == Path(filename).name:
+            try:
+                (out_dir / filename).unlink(missing_ok=True)
+            except OSError:
+                pass
     return n
 
 
