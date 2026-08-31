@@ -135,10 +135,20 @@ class RateLimiter:
 def build_app(tutor_url: str, tutor_key: str):
     from fastapi import FastAPI, Request, Header, HTTPException
     from fastapi.responses import JSONResponse
+    import httpx
     from openai import AsyncOpenAI
 
     app = FastAPI(title="ParaFrames API Gateway (dev scaffold)")
-    tutor = AsyncOpenAI(base_url=tutor_url, api_key=tutor_key)
+    tutor_transport = httpx.AsyncHTTPTransport(
+        limits=httpx.Limits(
+            max_connections=128,
+            max_keepalive_connections=64,
+            keepalive_expiry=120.0,
+        ),
+        retries=1,
+    )
+    tutor_client = httpx.AsyncClient(transport=tutor_transport, trust_env=False, timeout=httpx.Timeout(60.0, connect=5.0))
+    tutor = AsyncOpenAI(base_url=tutor_url, api_key=tutor_key, http_client=tutor_client)
     filt = ContentFilter()
     keys = load_keys()
     rl = RateLimiter()
@@ -175,7 +185,16 @@ def build_app(tutor_url: str, tutor_key: str):
                     last = e
         raise RuntimeError(f"CAD ({mode}) generation failed: {last}")
 
-    circuit = AsyncOpenAI(base_url=CIRCUIT_URL, api_key="none")
+    circuit_transport = httpx.AsyncHTTPTransport(
+        limits=httpx.Limits(
+            max_connections=128,
+            max_keepalive_connections=64,
+            keepalive_expiry=120.0,
+        ),
+        retries=1,
+    )
+    circuit_client = httpx.AsyncClient(transport=circuit_transport, trust_env=False, timeout=httpx.Timeout(60.0, connect=5.0))
+    circuit = AsyncOpenAI(base_url=CIRCUIT_URL, api_key="none", http_client=circuit_client)
     print(f"[*] /v1/circuit -> CPU llama.cpp {CIRCUIT_URL}")
 
     async def gen_circuit(prompt: str) -> dict:
