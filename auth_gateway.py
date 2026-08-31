@@ -49,10 +49,16 @@ KEYSTORE = Path(__file__).with_name("gateway_keys.json")
 #   CONSUMER (adult/supervised) also gets the direct "normal" assistant.
 # --------------------------------------------------------------------------
 AUDIENCE_MODES = {
-    "edu":      {"socratic", "graduated_hint"},
-    "consumer": {"socratic", "graduated_hint", "normal"},
-    "internal": {"socratic", "graduated_hint", "normal"},  # dev/TUI
+    "edu":      frozenset({"socratic", "graduated_hint"}),
+    "consumer": frozenset({"socratic", "graduated_hint", "normal"}),
+    "internal": frozenset({"socratic", "graduated_hint", "normal"}),  # dev/TUI
 }
+
+AUDIENCE_ALLOWED_MODES_SORTED = {
+    aud: sorted(modes) for aud, modes in AUDIENCE_MODES.items()
+}
+_EMPTY_SET = frozenset()
+_EMPTY_LIST = []
 
 SUBJECT_MODEL = {
     "math":          "ParaFrames/ParaClient-math-v2.2",
@@ -61,7 +67,7 @@ SUBJECT_MODEL = {
 }
 
 
-def system_prompt(mode: str, subject: str) -> str:
+def _build_system_prompt(mode: str, subject: str) -> str:
     subj = {"math": "math", "language_arts": "language arts",
             "general": "study"}.get(subject, subject)
     if mode == "socratic":
@@ -76,11 +82,42 @@ def system_prompt(mode: str, subject: str) -> str:
             f"question directly and clearly.")
 
 
-def model_for(mode: str, subject: str) -> str:
+def _build_model_for(mode: str, subject: str) -> str:
     # 'normal' uses the base (adapters are tuned to withhold; don't fight them)
     if mode == "normal":
         return "ParaFrames/ParaClient-v2.2"
     return SUBJECT_MODEL.get(subject, "ParaFrames/ParaClient-v2.2")
+
+
+# Pre-compute system prompt and model mapping tables for all standard (mode, subject) pairs
+_KNOWN_MODES = ("socratic", "graduated_hint", "normal")
+_KNOWN_SUBJECTS = ("math", "language_arts", "general")
+
+SYSTEM_PROMPT_TABLE = {
+    (m, s): _build_system_prompt(m, s)
+    for m in _KNOWN_MODES
+    for s in _KNOWN_SUBJECTS
+}
+
+MODEL_FOR_TABLE = {
+    (m, s): _build_model_for(m, s)
+    for m in _KNOWN_MODES
+    for s in _KNOWN_SUBJECTS
+}
+
+
+def system_prompt(mode: str, subject: str) -> str:
+    val = SYSTEM_PROMPT_TABLE.get((mode, subject))
+    if val is not None:
+        return val
+    return _build_system_prompt(mode, subject)
+
+
+def model_for(mode: str, subject: str) -> str:
+    val = MODEL_FOR_TABLE.get((mode, subject))
+    if val is not None:
+        return val
+    return _build_model_for(mode, subject)
 
 
 # The CAD routes (/v1/sketch = 2D, /v1/3d = 3D) run entirely on the L4 via a
@@ -244,7 +281,7 @@ def build_app(tutor_url: str, tutor_key: str):
         is held ONLY by that server — never sent to browsers."""
         _, rec = lookup(authorization)
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
-                "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], []))}
+                "allowed_modes": AUDIENCE_ALLOWED_MODES_SORTED.get(rec["audience"], _EMPTY_LIST)}
 
     @app.post("/v1/chat")
     async def chat(request: Request, authorization: str | None = Header(None)):
@@ -254,7 +291,7 @@ def build_app(tutor_url: str, tutor_key: str):
         subject = body.get("subject", "general")
         messages = body.get("messages", [])
 
-        if mode not in AUDIENCE_MODES.get(rec["audience"], set()):
+        if mode not in AUDIENCE_MODES.get(rec["audience"], _EMPTY_SET):
             raise HTTPException(
                 403, f"mode '{mode}' not allowed for audience '{rec['audience']}'")
 
@@ -267,11 +304,12 @@ def build_app(tutor_url: str, tutor_key: str):
                                  "safety": {"action": din.action.value,
                                             "categories": din.categories}})
 
+        model = model_for(mode, subject)
         sys_msg = {"role": "system", "content": system_prompt(mode, subject)}
         convo = [sys_msg] + [m for m in messages if m.get("role") != "system"]
         try:
             resp = await tutor.chat.completions.create(
-                model=model_for(mode, subject), messages=convo,
+                model=model, messages=convo,
                 max_tokens=body.get("max_tokens", 400),
                 temperature=body.get("temperature", 0.3))
             answer = resp.choices[0].message.content
@@ -282,7 +320,7 @@ def build_app(tutor_url: str, tutor_key: str):
         if dout.action != Action.ALLOW:
             answer = dout.student_message
         return JSONResponse({"role": "assistant", "content": answer,
-                             "model": model_for(mode, subject),
+                             "model": model,
                              "safety": {"action": dout.action.value}})
 
     @app.post("/v1/generate")
@@ -291,7 +329,7 @@ def build_app(tutor_url: str, tutor_key: str):
         # Docs/slides are a NON-SOCRATIC capability (direct generation), so they
         # follow the same audience rule as the 'normal' mode: consumer/internal
         # only, never EDU.
-        if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
+        if "normal" not in AUDIENCE_MODES.get(rec["audience"], _EMPTY_SET):
             raise HTTPException(
                 403, f"document/slide generation (non-socratic) not allowed "
                      f"for audience '{rec['audience']}'")
@@ -324,7 +362,7 @@ def build_app(tutor_url: str, tutor_key: str):
 
     async def _cad_route(mode: str, rec: dict, body: dict):
         # Non-socratic capability -> consumer/internal only (same rule as generate)
-        if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
+        if "normal" not in AUDIENCE_MODES.get(rec["audience"], _EMPTY_SET):
             raise HTTPException(
                 403, f"CAD generation (non-socratic) not allowed for "
                      f"audience '{rec['audience']}'")
@@ -356,7 +394,7 @@ def build_app(tutor_url: str, tutor_key: str):
     async def circuit_route(request: Request,
                             authorization: str | None = Header(None)):
         rec = auth(authorization)
-        if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
+        if "normal" not in AUDIENCE_MODES.get(rec["audience"], _EMPTY_SET):
             raise HTTPException(
                 403, f"circuit generation (non-socratic) not allowed for "
                      f"audience '{rec['audience']}'")
