@@ -39,6 +39,10 @@ from __future__ import annotations
 import re
 import json
 import time
+import os
+import queue
+import threading
+import atexit
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Callable
@@ -161,10 +165,73 @@ class ContentFilter:
                  log_path: str | None = "logs/content_filter.jsonl"):
         self.backend = backend or HeuristicBackend()
         self.log_path = log_path
+        self._queue: queue.Queue | None = None
+        self._stop_event = threading.Event()
+        self._worker_thread: threading.Thread | None = None
 
+        if self.log_path:
+            self._queue = queue.Queue()
+            self._worker_thread = threading.Thread(
+                target=self._logger_loop, daemon=True, name="ContentFilterLogger"
+            )
+            self._worker_thread.start()
+            atexit.register(self.flush)
+
+    def _logger_loop(self):
+        dir_created = False
+        file_handle = None
+        current_path = self.log_path
+
+        while not self._stop_event.is_set() or not self._queue.empty():
+            try:
+                rec = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                if file_handle and not file_handle.closed:
+                    try:
+                        file_handle.flush()
+                    except Exception:
+                        pass
+                continue
+
+            records = [rec]
+            while True:
+                try:
+                    records.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            try:
+                if not dir_created and current_path:
+                    dirname = os.path.dirname(current_path)
+                    if dirname:
+                        os.makedirs(dirname, exist_ok=True)
+                    dir_created = True
+
+                if file_handle is None or file_handle.closed:
+                    file_handle = open(current_path, "a", encoding="utf-8")
+
+                for r in records:
+                    file_handle.write(json.dumps(r, ensure_ascii=False) + "\n")
+                file_handle.flush()
+            except Exception:
+                pass
+            finally:
+                for _ in records:
+                    self._queue.task_done()
+
+        if file_handle and not file_handle.closed:
+            try:
+                file_handle.flush()
+                file_handle.close()
+            except Exception:
+                pass
+
+    def flush(self):
+        if self._queue:
+            self._queue.join()
     # -- logging: every decision, allow or block, for R1 signal --------------
     def _log(self, surface: str, text: str, decision: Decision):
-        if not self.log_path:
+        if not self.log_path or not self._queue:
             return
         rec = {
             "ts": time.time(),
@@ -174,10 +241,7 @@ class ContentFilter:
             "decision": asdict(decision) | {"action": decision.action.value},
         }
         try:
-            import os
-            os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
-            with open(self.log_path, "a") as fh:
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            self._queue.put_nowait(rec)
         except Exception:
             pass  # logging must never break the request path
 
