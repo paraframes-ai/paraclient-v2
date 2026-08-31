@@ -135,10 +135,10 @@ class RateLimiter:
 def build_app(tutor_url: str, tutor_key: str):
     from fastapi import FastAPI, Request, Header, HTTPException
     from fastapi.responses import JSONResponse
-    from openai import OpenAI
+    from openai import AsyncOpenAI
 
     app = FastAPI(title="ParaFrames API Gateway (dev scaffold)")
-    tutor = OpenAI(base_url=tutor_url, api_key=tutor_key)
+    tutor = AsyncOpenAI(base_url=tutor_url, api_key=tutor_key)
     filt = ContentFilter()
     keys = load_keys()
     rl = RateLimiter()
@@ -156,7 +156,7 @@ def build_app(tutor_url: str, tutor_key: str):
     except Exception as e:  # noqa: BLE001
         print(f"[!] embedder load failed ({e}); /v1/embed disabled")
 
-    def gen_cad_json(mode: str, prompt: str, units: str) -> dict:
+    async def gen_cad_json(mode: str, prompt: str, units: str) -> dict:
         """Generate CAD JSON on the local paraclient CAD adapter (mode is
         'sketch' for 2D or '3d' for 3D). Falls back to the base paraclient if
         the adapter isn't loaded yet; retries a few times on a parse failure."""
@@ -167,7 +167,7 @@ def build_app(tutor_url: str, tutor_key: str):
         for model in (CAD_MODEL, BASE_MODEL):
             for _ in range(3):
                 try:
-                    r = tutor.chat.completions.create(
+                    r = await tutor.chat.completions.create(
                         model=model, messages=msgs,
                         max_tokens=3000, temperature=0.2)
                     return gm.parse_json(r.choices[0].message.content.strip())
@@ -175,10 +175,10 @@ def build_app(tutor_url: str, tutor_key: str):
                     last = e
         raise RuntimeError(f"CAD ({mode}) generation failed: {last}")
 
-    circuit = OpenAI(base_url=CIRCUIT_URL, api_key="none")
+    circuit = AsyncOpenAI(base_url=CIRCUIT_URL, api_key="none")
     print(f"[*] /v1/circuit -> CPU llama.cpp {CIRCUIT_URL}")
 
-    def gen_circuit(prompt: str) -> dict:
+    async def gen_circuit(prompt: str) -> dict:
         """Netlist on the CPU circuit model with ERC-gated rejection sampling:
         try a few, return the first electrically-valid one (else the best-effort
         structurally-clean last result)."""
@@ -187,7 +187,7 @@ def build_app(tutor_url: str, tutor_key: str):
         last = None
         for _ in range(3):
             try:
-                r = circuit.chat.completions.create(
+                r = await circuit.chat.completions.create(
                     model="circuit", messages=msgs,
                     max_tokens=900, temperature=0.4)
                 nl = circuit_clean(gm.parse_json(r.choices[0].message.content.strip()))
@@ -251,7 +251,7 @@ def build_app(tutor_url: str, tutor_key: str):
         sys_msg = {"role": "system", "content": system_prompt(mode, subject)}
         convo = [sys_msg] + [m for m in messages if m.get("role") != "system"]
         try:
-            resp = tutor.chat.completions.create(
+            resp = await tutor.chat.completions.create(
                 model=model_for(mode, subject), messages=convo,
                 max_tokens=body.get("max_tokens", 400),
                 temperature=body.get("temperature", 0.3))
@@ -288,8 +288,8 @@ def build_app(tutor_url: str, tutor_key: str):
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
         try:
-            data = (gm.generate_agentic(tutor, BASE_MODEL, kind, prompt) if web
-                    else gm.generate(tutor, BASE_MODEL, kind, prompt))
+            data = (await gm.generate_agentic(tutor, BASE_MODEL, kind, prompt) if web
+                    else await gm.generate(tutor, BASE_MODEL, kind, prompt))
             name, theme = gm.pick_theme(data, body.get("theme"))
             ext = "pptx" if kind == "slides" else "docx"
             out = Path("out") / f"gen-{int(time.time()*1000)}.{ext}"
@@ -303,7 +303,7 @@ def build_app(tutor_url: str, tutor_key: str):
         return JSONResponse({"kind": kind, "theme": name, "filename": out.name,
                              "content_type": ctype, "file_base64": b})
 
-    def _cad_route(mode: str, rec: dict, body: dict):
+    async def _cad_route(mode: str, rec: dict, body: dict):
         # Non-socratic capability -> consumer/internal only (same rule as generate)
         if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
             raise HTTPException(
@@ -317,7 +317,7 @@ def build_app(tutor_url: str, tutor_key: str):
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
         try:
-            data = gen_cad_json(mode, prompt, units)
+            data = await gen_cad_json(mode, prompt, units)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"CAD ({mode}) generation failed: {e}")
         out = clean_sketch(data, units) if mode == "sketch" else clean_solid(data, units)
@@ -326,12 +326,12 @@ def build_app(tutor_url: str, tutor_key: str):
     @app.post("/v1/sketch")
     async def sketch(request: Request, authorization: str | None = Header(None)):
         rec = auth(authorization)
-        return _cad_route("sketch", rec, await request.json())
+        return await _cad_route("sketch", rec, await request.json())
 
     @app.post("/v1/3d")
     async def three_d(request: Request, authorization: str | None = Header(None)):
         rec = auth(authorization)
-        return _cad_route("3d", rec, await request.json())
+        return await _cad_route("3d", rec, await request.json())
 
     @app.post("/v1/circuit")
     async def circuit_route(request: Request,
@@ -349,7 +349,7 @@ def build_app(tutor_url: str, tutor_key: str):
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
         try:
-            data = gen_circuit(prompt)
+            data = await gen_circuit(prompt)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"circuit generation failed: {e}")
         return JSONResponse(data)

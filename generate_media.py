@@ -19,6 +19,8 @@ Usage (against the running vLLM endpoint):
   # theme is auto-chosen for slides; override with --theme <name> if you like.
 """
 import argparse
+import asyncio
+import inspect
 import json
 import re
 from pathlib import Path
@@ -151,13 +153,14 @@ def _clean(obj):
     return obj
 
 
-def generate(client, model, kind, user_prompt, retries=3):
+async def generate(client, model, kind, user_prompt, retries=3):
     last = None
     for _ in range(retries):
         try:
-            r = client.chat.completions.create(
+            res = client.chat.completions.create(
                 model=model, messages=build_prompt(kind, user_prompt),
                 max_tokens=4000, temperature=0.4)
+            r = await res if inspect.isawaitable(res) else res
             return _clean(parse_json(r.choices[0].message.content.strip()))
         except Exception as e:  # noqa: BLE001
             last = e
@@ -268,7 +271,7 @@ _AGENT_SYS = (
 )
 
 
-def generate_agentic(client, model, kind, user_prompt, max_steps=10, min_research=3):
+async def generate_agentic(client, model, kind, user_prompt, max_steps=10, min_research=3):
     """Our own local agent: the paraclient model runs a search/fetch loop (tools
     run here), then returns the doc/slides JSON. Enforces a minimum amount of
     real research before it may finalize; falls back to a single-shot generation
@@ -283,8 +286,9 @@ def generate_agentic(client, model, kind, user_prompt, max_steps=10, min_researc
             messages.append({"role": "user", "content":
                 'Stop researching. Output ONLY {"final": <document JSON>} now.'})
         try:
-            r = client.chat.completions.create(
+            res = client.chat.completions.create(
                 model=model, messages=messages, max_tokens=3000, temperature=0.3)
+            r = await res if inspect.isawaitable(res) else res
         except Exception:  # noqa: BLE001 -- e.g. context overflow: bail to fallback
             break
         raw = r.choices[0].message.content.strip()
@@ -318,7 +322,7 @@ def generate_agentic(client, model, kind, user_prompt, max_steps=10, min_researc
             obs = '[unknown action — use "search", "fetch", or "final"]'
         messages += [{"role": "assistant", "content": raw},
                      {"role": "user", "content": "OBSERVATION:\n" + obs}]
-    return generate(client, model, kind, user_prompt)  # last-resort single shot
+    return await generate(client, model, kind, user_prompt)  # last-resort single shot
 
 
 def pick_theme(data: dict, override: str | None) -> dict:
@@ -434,7 +438,7 @@ def main():
     client = OpenAI(base_url=args.base_url, api_key=args.api_key)
 
     print(f"[*] Generating {args.kind} via {args.model}...")
-    data = generate(client, args.model, args.kind, args.prompt)
+    data = asyncio.run(generate(client, args.model, args.kind, args.prompt))
     name, theme = pick_theme(data, args.theme)
     out = Path(args.out)
     if args.kind == "slides":
