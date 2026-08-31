@@ -72,6 +72,12 @@ ESCALATE_CATEGORIES = {"self_harm", "abuse_disclosure"}
 BLOCK_CATEGORIES = {
     "sexual", "violence", "harassment", "hate", "dangerous",
     "self_harm", "abuse_disclosure",  # also block the normal flow
+    # screen_output() rewrites an ESCALATE hit to "self_harm_content" (escalation
+    # is an input-side concept). Without that label here, _decide() matched
+    # neither the escalate set nor the block set and fell through to ALLOW —
+    # so self-harm content in TUTOR OUTPUT reached the student, and the
+    # Action.ESCALATE guard below the _decide() call was unreachable.
+    "self_harm_content",
 }
 
 
@@ -97,8 +103,15 @@ class HeuristicBackend(ModerationBackend):
     def __init__(self):
         # Coarse signals only. Real detection belongs in a trained classifier.
         self._patterns = {
+            # First-person forms catch a student DISCLOSING distress (the input
+            # surface). Second-person forms catch a tutor DIRECTING harm at the
+            # student (the output surface) -- the original pattern was
+            # first-person only and reused verbatim for output screening, so
+            # "you should kill yourself" from the tutor matched nothing at all.
             "self_harm": re.compile(
-                r"\b(hurt myself|kill myself|want to die|end (it|my life)|"
+                r"\b(hurt (myself|yourself)|kill (myself|yourself)|"
+                r"harm (myself|yourself)|want to die|"
+                r"end (it|my life|your life)|"
                 r"suicidal|self[- ]harm)\b", re.IGNORECASE),
             "abuse_disclosure": re.compile(
                 r"\b(someone (hurts|touches) me|being abused|"
