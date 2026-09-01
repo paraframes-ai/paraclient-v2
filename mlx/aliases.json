@@ -1,0 +1,28 @@
+{
+  "_comment": "Maps the model names auth_gateway.py emits (model_for(mode, subject) and CAD_MODEL) onto MLX model dirs and per-subject LoRA adapters. 'default' is used when a request names something unknown. Point 'model' at the output of convert_mlx.py.",
+  "default": {
+    "model": "models/mlx/qwen2.5-7b-instruct-4bit",
+    "adapter": null,
+    "draft": null
+  },
+  "ParaFrames/ParaClient-v2.2": {
+    "model": "models/mlx/qwen2.5-7b-instruct-4bit",
+    "adapter": null
+  },
+  "ParaFrames/ParaClient-math-v2.2": {
+    "model": "models/mlx/qwen2.5-7b-instruct-4bit",
+    "adapter": "adapters/math"
+  },
+  "ParaFrames/ParaClient-language-v2.2": {
+    "model": "models/mlx/qwen2.5-7b-instruct-4bit",
+    "adapter": "adapters/language_arts"
+  },
+  "ParaFrames/ParaClient-cad-v2.2": {
+    "model": "models/mlx/qwen2.5-7b-instruct-4bit",
+    "adapter": "adapters/cad"
+  },
+  "circuit": {
+    "model": "models/mlx/qwen2.5-3b-instruct-4bit",
+    "adapter": "adapters/circuits"
+  }
+}
