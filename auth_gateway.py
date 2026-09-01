@@ -49,10 +49,16 @@ KEYSTORE = Path(__file__).with_name("gateway_keys.json")
 #   CONSUMER (adult/supervised) also gets the direct "normal" assistant.
 # --------------------------------------------------------------------------
 AUDIENCE_MODES = {
-    "edu":      {"socratic", "graduated_hint"},
-    "consumer": {"socratic", "graduated_hint", "normal"},
-    "internal": {"socratic", "graduated_hint", "normal"},  # dev/TUI
+    "edu":      frozenset({"socratic", "graduated_hint"}),
+    "consumer": frozenset({"socratic", "graduated_hint", "normal"}),
+    "internal": frozenset({"socratic", "graduated_hint", "normal"}),  # dev/TUI
 }
+
+AUDIENCE_ALLOWED_MODES_SORTED = {
+    aud: sorted(modes) for aud, modes in AUDIENCE_MODES.items()
+}
+_EMPTY_SET = frozenset()
+_EMPTY_LIST = []
 
 SUBJECT_MODEL = {
     "math":          "ParaFrames/ParaClient-math-v2.2",
@@ -61,7 +67,7 @@ SUBJECT_MODEL = {
 }
 
 
-def system_prompt(mode: str, subject: str) -> str:
+def _build_system_prompt(mode: str, subject: str) -> str:
     subj = {"math": "math", "language_arts": "language arts",
             "general": "study"}.get(subject, subject)
     if mode == "socratic":
@@ -76,11 +82,42 @@ def system_prompt(mode: str, subject: str) -> str:
             f"question directly and clearly.")
 
 
-def model_for(mode: str, subject: str) -> str:
+def _build_model_for(mode: str, subject: str) -> str:
     # 'normal' uses the base (adapters are tuned to withhold; don't fight them)
     if mode == "normal":
         return "ParaFrames/ParaClient-v2.2"
     return SUBJECT_MODEL.get(subject, "ParaFrames/ParaClient-v2.2")
+
+
+# Pre-compute system prompt and model mapping tables for all standard (mode, subject) pairs
+_KNOWN_MODES = ("socratic", "graduated_hint", "normal")
+_KNOWN_SUBJECTS = ("math", "language_arts", "general")
+
+SYSTEM_PROMPT_TABLE = {
+    (m, s): _build_system_prompt(m, s)
+    for m in _KNOWN_MODES
+    for s in _KNOWN_SUBJECTS
+}
+
+MODEL_FOR_TABLE = {
+    (m, s): _build_model_for(m, s)
+    for m in _KNOWN_MODES
+    for s in _KNOWN_SUBJECTS
+}
+
+
+def system_prompt(mode: str, subject: str) -> str:
+    val = SYSTEM_PROMPT_TABLE.get((mode, subject))
+    if val is not None:
+        return val
+    return _build_system_prompt(mode, subject)
+
+
+def model_for(mode: str, subject: str) -> str:
+    val = MODEL_FOR_TABLE.get((mode, subject))
+    if val is not None:
+        return val
+    return _build_model_for(mode, subject)
 
 
 # The CAD routes (/v1/sketch = 2D, /v1/3d = 3D) run entirely on the L4 via a
@@ -135,10 +172,20 @@ class RateLimiter:
 def build_app(tutor_url: str, tutor_key: str):
     from fastapi import FastAPI, Request, Header, HTTPException
     from fastapi.responses import JSONResponse
-    from openai import OpenAI
+    import httpx
+    from openai import AsyncOpenAI
 
     app = FastAPI(title="ParaFrames API Gateway (dev scaffold)")
-    tutor = OpenAI(base_url=tutor_url, api_key=tutor_key)
+    tutor_transport = httpx.AsyncHTTPTransport(
+        limits=httpx.Limits(
+            max_connections=128,
+            max_keepalive_connections=64,
+            keepalive_expiry=120.0,
+        ),
+        retries=1,
+    )
+    tutor_client = httpx.AsyncClient(transport=tutor_transport, trust_env=False, timeout=httpx.Timeout(60.0, connect=5.0))
+    tutor = AsyncOpenAI(base_url=tutor_url, api_key=tutor_key, http_client=tutor_client)
     filt = ContentFilter()
     keys = load_keys()
     rl = RateLimiter()
@@ -156,7 +203,7 @@ def build_app(tutor_url: str, tutor_key: str):
     except Exception as e:  # noqa: BLE001
         print(f"[!] embedder load failed ({e}); /v1/embed disabled")
 
-    def gen_cad_json(mode: str, prompt: str, units: str) -> dict:
+    async def gen_cad_json(mode: str, prompt: str, units: str) -> dict:
         """Generate CAD JSON on the local paraclient CAD adapter (mode is
         'sketch' for 2D or '3d' for 3D). Falls back to the base paraclient if
         the adapter isn't loaded yet; retries a few times on a parse failure."""
@@ -167,7 +214,7 @@ def build_app(tutor_url: str, tutor_key: str):
         for model in (CAD_MODEL, BASE_MODEL):
             for _ in range(3):
                 try:
-                    r = tutor.chat.completions.create(
+                    r = await tutor.chat.completions.create(
                         model=model, messages=msgs,
                         max_tokens=3000, temperature=0.2)
                     return gm.parse_json(r.choices[0].message.content.strip())
@@ -175,10 +222,19 @@ def build_app(tutor_url: str, tutor_key: str):
                     last = e
         raise RuntimeError(f"CAD ({mode}) generation failed: {last}")
 
-    circuit = OpenAI(base_url=CIRCUIT_URL, api_key="none")
+    circuit_transport = httpx.AsyncHTTPTransport(
+        limits=httpx.Limits(
+            max_connections=128,
+            max_keepalive_connections=64,
+            keepalive_expiry=120.0,
+        ),
+        retries=1,
+    )
+    circuit_client = httpx.AsyncClient(transport=circuit_transport, trust_env=False, timeout=httpx.Timeout(60.0, connect=5.0))
+    circuit = AsyncOpenAI(base_url=CIRCUIT_URL, api_key="none", http_client=circuit_client)
     print(f"[*] /v1/circuit -> CPU llama.cpp {CIRCUIT_URL}")
 
-    def gen_circuit(prompt: str) -> dict:
+    async def gen_circuit(prompt: str) -> dict:
         """Netlist on the CPU circuit model with ERC-gated rejection sampling:
         try a few, return the first electrically-valid one (else the best-effort
         structurally-clean last result)."""
@@ -187,7 +243,7 @@ def build_app(tutor_url: str, tutor_key: str):
         last = None
         for _ in range(3):
             try:
-                r = circuit.chat.completions.create(
+                r = await circuit.chat.completions.create(
                     model="circuit", messages=msgs,
                     max_tokens=900, temperature=0.4)
                 nl = circuit_clean(gm.parse_json(r.choices[0].message.content.strip()))
@@ -225,7 +281,7 @@ def build_app(tutor_url: str, tutor_key: str):
         is held ONLY by that server — never sent to browsers."""
         _, rec = lookup(authorization)
         return {"ok": True, "user": rec["user"], "audience": rec["audience"],
-                "allowed_modes": sorted(AUDIENCE_MODES.get(rec["audience"], []))}
+                "allowed_modes": AUDIENCE_ALLOWED_MODES_SORTED.get(rec["audience"], _EMPTY_LIST)}
 
     @app.post("/v1/chat")
     async def chat(request: Request, authorization: str | None = Header(None)):
@@ -235,7 +291,7 @@ def build_app(tutor_url: str, tutor_key: str):
         subject = body.get("subject", "general")
         messages = body.get("messages", [])
 
-        if mode not in AUDIENCE_MODES.get(rec["audience"], set()):
+        if mode not in AUDIENCE_MODES.get(rec["audience"], _EMPTY_SET):
             raise HTTPException(
                 403, f"mode '{mode}' not allowed for audience '{rec['audience']}'")
 
@@ -248,11 +304,12 @@ def build_app(tutor_url: str, tutor_key: str):
                                  "safety": {"action": din.action.value,
                                             "categories": din.categories}})
 
+        model = model_for(mode, subject)
         sys_msg = {"role": "system", "content": system_prompt(mode, subject)}
         convo = [sys_msg] + [m for m in messages if m.get("role") != "system"]
         try:
-            resp = tutor.chat.completions.create(
-                model=model_for(mode, subject), messages=convo,
+            resp = await tutor.chat.completions.create(
+                model=model, messages=convo,
                 max_tokens=body.get("max_tokens", 400),
                 temperature=body.get("temperature", 0.3))
             answer = resp.choices[0].message.content
@@ -263,7 +320,7 @@ def build_app(tutor_url: str, tutor_key: str):
         if dout.action != Action.ALLOW:
             answer = dout.student_message
         return JSONResponse({"role": "assistant", "content": answer,
-                             "model": model_for(mode, subject),
+                             "model": model,
                              "safety": {"action": dout.action.value}})
 
     @app.post("/v1/generate")
@@ -272,7 +329,7 @@ def build_app(tutor_url: str, tutor_key: str):
         # Docs/slides are a NON-SOCRATIC capability (direct generation), so they
         # follow the same audience rule as the 'normal' mode: consumer/internal
         # only, never EDU.
-        if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
+        if "normal" not in AUDIENCE_MODES.get(rec["audience"], _EMPTY_SET):
             raise HTTPException(
                 403, f"document/slide generation (non-socratic) not allowed "
                      f"for audience '{rec['audience']}'")
@@ -288,8 +345,8 @@ def build_app(tutor_url: str, tutor_key: str):
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
         try:
-            data = (gm.generate_agentic(tutor, BASE_MODEL, kind, prompt) if web
-                    else gm.generate(tutor, BASE_MODEL, kind, prompt))
+            data = (await gm.generate_agentic(tutor, BASE_MODEL, kind, prompt) if web
+                    else await gm.generate(tutor, BASE_MODEL, kind, prompt))
             name, theme = gm.pick_theme(data, body.get("theme"))
             ext = "pptx" if kind == "slides" else "docx"
             out = Path("out") / f"gen-{int(time.time()*1000)}.{ext}"
@@ -303,9 +360,9 @@ def build_app(tutor_url: str, tutor_key: str):
         return JSONResponse({"kind": kind, "theme": name, "filename": out.name,
                              "content_type": ctype, "file_base64": b})
 
-    def _cad_route(mode: str, rec: dict, body: dict):
+    async def _cad_route(mode: str, rec: dict, body: dict):
         # Non-socratic capability -> consumer/internal only (same rule as generate)
-        if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
+        if "normal" not in AUDIENCE_MODES.get(rec["audience"], _EMPTY_SET):
             raise HTTPException(
                 403, f"CAD generation (non-socratic) not allowed for "
                      f"audience '{rec['audience']}'")
@@ -317,7 +374,7 @@ def build_app(tutor_url: str, tutor_key: str):
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
         try:
-            data = gen_cad_json(mode, prompt, units)
+            data = await gen_cad_json(mode, prompt, units)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"CAD ({mode}) generation failed: {e}")
         out = clean_sketch(data, units) if mode == "sketch" else clean_solid(data, units)
@@ -326,18 +383,18 @@ def build_app(tutor_url: str, tutor_key: str):
     @app.post("/v1/sketch")
     async def sketch(request: Request, authorization: str | None = Header(None)):
         rec = auth(authorization)
-        return _cad_route("sketch", rec, await request.json())
+        return await _cad_route("sketch", rec, await request.json())
 
     @app.post("/v1/3d")
     async def three_d(request: Request, authorization: str | None = Header(None)):
         rec = auth(authorization)
-        return _cad_route("3d", rec, await request.json())
+        return await _cad_route("3d", rec, await request.json())
 
     @app.post("/v1/circuit")
     async def circuit_route(request: Request,
                             authorization: str | None = Header(None)):
         rec = auth(authorization)
-        if "normal" not in AUDIENCE_MODES.get(rec["audience"], set()):
+        if "normal" not in AUDIENCE_MODES.get(rec["audience"], _EMPTY_SET):
             raise HTTPException(
                 403, f"circuit generation (non-socratic) not allowed for "
                      f"audience '{rec['audience']}'")
@@ -349,7 +406,7 @@ def build_app(tutor_url: str, tutor_key: str):
         if din.action != Action.ALLOW:
             return JSONResponse({"error": "blocked", "safety": din.categories}, 403)
         try:
-            data = gen_circuit(prompt)
+            data = await gen_circuit(prompt)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"circuit generation failed: {e}")
         return JSONResponse(data)
