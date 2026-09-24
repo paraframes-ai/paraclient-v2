@@ -18,7 +18,7 @@ not a measurement of tutoring quality; live behavioral evaluation remains pendin
 All project work is on CSAIL NFS, never the laptop or AFS home:
 
 - `NFS_ROOT=/data/scratch/ashwin`
-- Clone: `/data/scratch/ashwin/paraclient-muse`, branch `muse-glimmer`
+- Clone: `/data/scratch/ashwin/paraclient-muse`, branch `paraclient-v7`
 - ARM environment: `/data/scratch/ashwin/envs/muse-arm`
 - Hugging Face cache: `/data/scratch/ashwin/hf`
 - Slurm logs: `/data/scratch/ashwin/logs`

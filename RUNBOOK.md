@@ -1,7 +1,7 @@
 # CSAIL ParaClient Muse runbook
 
 The detailed commands, data schema, and safety limitations are in [README.md](README.md).
-All work is remote at `/data/scratch/ashwin/paraclient-muse`, branch `muse-glimmer`.
+All work is remote at `/data/scratch/ashwin/paraclient-muse`, branch `paraclient-v7`.
 Use `ssh -o BatchMode=yes slurm-agent` for every remote command. Never place code,
 data, environments, or weights in AFS, and never load/train models on the login node.
 
@@ -37,7 +37,7 @@ tool content never enter the filter or student response. Keep vLLM localhost-onl
 The current proxy has no application tool execution loop; live tool probes use
 controlled fixtures against the research backend.
 
-Scratch is unbacked. Commit code in the remote clone without pushing, archive
+Scratch is unbacked. Commit code in the remote clone; push only with explicit authorization. Archive
 compact reports and final adapter files separately, and omit optimizer checkpoints
 from serving copies. Existing Qwen workflows retain the original requirements
 stack and default NF4 training; do not replace the Muse ARM environment with it.

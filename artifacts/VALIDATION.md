@@ -1,7 +1,8 @@
 # Validation record
 
 All work was performed remotely under `/data/scratch/ashwin`; no project files
-were created on the laptop. Branch: `muse-glimmer`. No push or PR was performed.
+were created on the laptop. Initial work was committed on `muse-glimmer`;
+`paraclient-v7` is the user-authorized branch prepared for pull-request review.
 
 ## Storage and environment
 
@@ -89,5 +90,5 @@ were created on the laptop. Branch: `muse-glimmer`. No push or PR was performed.
 - The independent proxy strips framing/structured private fields; unmarked
   reasoning embedded in ordinary text still requires behavioral evaluation.
   The current proxy has no application tool-execution loop.
-- Scratch is unbacked. Code is committed only in the remote clone; archive final
-  adapter/report files to durable storage separately. No push was authorized.
+- Scratch is unbacked. The user subsequently authorized publishing `paraclient-v7` for review. Archive
+  final adapter/report files to durable storage separately; they are excluded from Git.
