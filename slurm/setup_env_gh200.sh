@@ -21,10 +21,22 @@ if [[ -e "$VENV" && ! -f "$VENV/.paraclient-muse-env" ]]; then
     exit 1
 fi
 if [[ ! -d "$VENV" ]]; then
-    python3 -m venv "$VENV"
+    mkdir -p "$VENV"
     touch "$VENV/.paraclient-muse-env"
+    python3 -m venv --without-pip "$VENV"
 fi
 source "$VENV/bin/activate"
+if ! python -m pip --version >/dev/null 2>&1; then
+    python - <<'PYBOOT'
+import os
+from pathlib import Path
+import urllib.request
+path = Path(os.environ['TMPDIR']) / 'get-pip.py'
+with urllib.request.urlopen('https://bootstrap.pypa.io/get-pip.py', timeout=60) as response:
+    path.write_bytes(response.read())
+PYBOOT
+    python "$TMPDIR/get-pip.py"
+fi
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install --only-binary=:all: torch torchvision --index-url https://download.pytorch.org/whl/cu128
 python -m pip install 'transformers==5.17.0' 'peft==0.21.0' 'trl==1.13.0' 'accelerate==1.15.0' 'datasets==5.0.1' pillow sentencepiece openai fastapi uvicorn httpx jsonschema pytest
