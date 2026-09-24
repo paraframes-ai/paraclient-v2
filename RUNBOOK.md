@@ -1,95 +1,43 @@
-# ParaFrames Tutor — Runbook
+# CSAIL ParaClient Muse runbook
 
-One base model (`Qwen/Qwen2.5-7B-Instruct`, Apache-2.0) + one LoRA adapter per
-subject. Each adapter learns two MODES from its data:
-  - socratic        : withholds the answer, guides with questions
-  - graduated_hint  : guides first, then escalates to hints/worked steps
-Mode is chosen at inference via the system prompt.
+The detailed commands, data schema, and safety limitations are in [README.md](README.md).
+All work is remote at `/data/scratch/ashwin/paraclient-muse`, branch `muse-glimmer`.
+Use `ssh -o BatchMode=yes slurm-agent` for every remote command. Never place code,
+data, environments, or weights in AFS, and never load/train models on the login node.
 
-## Files
-  scripts/build_dataset.py        Build/validate/merge training JSONL per subject
-  scripts/train_adapter.py        QLoRA fine-tune one adapter (fits a 24GB L4)
-  scripts/eval_adapter.py         Behavioral eval (withholds? escalates?)
-  scripts/synthesize_dialogues.py Seed content -> dialogues (Civics + LA)
-  scripts/review_dialogues.py     Human review gate (mandatory for Civics)
-  requirements.txt                Pinned stack
+1. Run `slurm/setup_env_gh200.sh` through a GH200 Slurm job. It creates
+   `/data/scratch/ashwin/envs/muse-arm`, installs cu128 ARM wheels, and verifies CUDA.
+   Read `artifacts/environment.json` and the resolved requirements lock. If ARM
+   compatibility fails, consider the NVIDIA NGC PyTorch/Apptainer fallback in README.
+2. Submit `slurm/inspect_muse.sbatch`. Read `artifacts/muse_inspection.json` for the
+   pinned model revision, actual module names, and executed native chat-template
+   examples. Stop and ask if Hugging Face authentication becomes necessary.
+3. Run the one authorized `slurm/smoke_muse.sbatch`. It builds math with
+   `--limit 200`, adds four tool fixtures, runs six steps, and tests SIGUSR1 save and
+   automatic resume in a single 45-minute allocation. Read the job-specific summary.
+   Do not submit another training smoke job without approval.
+4. Prepare reviewed `data/raw/<subject>.synth.jsonl` and optional
+   `<subject>.tools.jsonl` for the study. Civics retains mandatory human review.
+   Preserve source/generator provenance and license/attribution requirements.
+5. The four-day `slurm/train_muse.sbatch` subject array is **not authorized for
+   automatic submission**. Ask before running it or any other additional GPU work.
+   It trains one adapter per GH200, saves bounded checkpoints, and requeues after
+   graceful SIGUSR1 saving. Missing reviewed data fails the corresponding task.
+6. Later, copy final adapters and the inspection report to the serving host. Run
+   `serve_tardy.sh` there using a compatible x86_64 vLLM environment. Only GPUs 2/3
+   are allowed. The script validates installed LoRA/parser support before launch;
+   do not silently merge adapters or switch architectures to bypass a failed check.
+7. Run `eval_adapter.py --base muse` against an authorized local research backend,
+   then human-review a representative sample. Automated numeric answer and recovery
+   checks are heuristics, not validation for student deployment.
 
-## Subject status
-  math          GSM8K-socratic (MIT, human-written)  -> READY, no synthesis
-  language_arts FairytaleQA seed -> synthesize        -> needs seed + generator
-  civics        NAEP/CivEd seed  -> synthesize        -> needs seed + generator + review
-  general       synthesize                            -> later
+The safety/content-filter layer remains independent. The proxy extracts only
+student-facing `to=user` content before output moderation; private `to=self` and
+tool content never enter the filter or student response. Keep vLLM localhost-only.
+The current proxy has no application tool execution loop; live tool probes use
+controlled fixtures against the research backend.
 
-===========================================================================
-## TRACK A — MATH (do this first; it proves the whole pipeline)
-===========================================================================
-On your L4 VM:
-
-  python -m venv venv && source venv/bin/activate
-  pip install -r requirements.txt
-
-  # 1. build data (small trial first)
-  python scripts/build_dataset.py --subject math --limit 200
-  python scripts/build_dataset.py --subject math          # full
-
-  # 2. train (slow on L4 — hours; that's expected)
-  python scripts/train_adapter.py --subject math --data data/math.jsonl
-  #    OOM? add:  --max-seq-len 1024   (keep batch-size 1, raise --grad-accum)
-
-  # 3. serve (separate terminal)
-  vllm serve Qwen/Qwen2.5-7B-Instruct --enable-lora \
-      --lora-modules math=adapters/math \
-      --max-model-len 4096 --gpu-memory-utilization 0.9
-
-  # 4. eval behavior
-  python scripts/eval_adapter.py --adapter math
-  #    then READ some transcripts yourself. The eval is a smoke test, not proof.
-
-Math done end-to-end = pipeline validated. Only then move on.
-
-===========================================================================
-## TRACK B — LANGUAGE ARTS, then CIVICS (data work, not ML work)
-===========================================================================
-Prereq you own: a generator model whose OUTPUT license permits training a
-commercial model, served at an OpenAI-compatible URL.
-
-  # 1. get licensed seed -> JSONL with documented keys:
-  #    data/seed/fairytaleqa.jsonl   (LA;  CC BY 4.0 — attribute)
-  #    data/seed/naep_civics.jsonl   (Civics; confirm item reuse terms)
-
-  # 2. synthesize (TRIAL of 10 first — check quality before scaling)
-  python scripts/synthesize_dialogues.py --subject language_arts \
-      --seed data/seed/fairytaleqa.jsonl \
-      --generator-url <YOUR_CLEARED_ENDPOINT> \
-      --generator-model <YOUR_MODEL> \
-      --out data/raw/language_arts.synth.jsonl --limit 10
-
-  # 3. human-review (full read first time; civics = mandatory, every row)
-  python scripts/review_dialogues.py --in data/raw/language_arts.synth.jsonl
-  #    -> writes data/raw/language_arts.synth.reviewed.jsonl (accepted only)
-  #    rename to language_arts.synth.jsonl so build_dataset picks it up.
-
-  # 4. validate + merge, then train + serve + eval exactly like math
-  python scripts/build_dataset.py --subject language_arts
-  python scripts/train_adapter.py --subject language_arts --data data/language_arts.jsonl
-
-Repeat for civics (heaviest review). Order: LA -> Civics.
-
-===========================================================================
-## SERVING ALL SUBJECTS AT ONCE
-===========================================================================
-  vllm serve Qwen/Qwen2.5-7B-Instruct --enable-lora --max-loras 4 \
-      --lora-modules math=adapters/math language_arts=adapters/language_arts \
-                     civics=adapters/civics general=adapters/general \
-      --max-model-len 4096 --gpu-memory-utilization 0.9
-Select subject per request via the OpenAI `model` field.
-
-===========================================================================
-## OPEN ITEMS YOU OWN (not code)
-===========================================================================
-  [ ] Confirm generator model output-license allows commercial training use
-  [ ] Confirm FairytaleQA license on the copy you download (expect CC BY 4.0)
-  [ ] Confirm NAEP/CivEd item reuse terms (govt ≠ automatically clear for items)
-  [ ] Safety layer OUTSIDE the model: input/output filtering, mental-health
-      flagging, teacher guardrail toggles — the adapter is NOT your safety net
-  [ ] Privacy/DPA + COPPA (consumer) / FERPA (schools) — legal review before sale
+Scratch is unbacked. Commit code in the remote clone without pushing, archive
+compact reports and final adapter files separately, and omit optimizer checkpoints
+from serving copies. Existing Qwen workflows retain the original requirements
+stack and default NF4 training; do not replace the Muse ARM environment with it.

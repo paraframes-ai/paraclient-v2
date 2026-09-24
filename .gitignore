@@ -23,3 +23,8 @@ __pycache__/
 *.pyc
 .claude/
 *.bak
+
+# Remote research runs: keep only compact summaries under version control
+.pytest_cache/
+artifacts/smoke-*/
+artifacts/unit-tests.xml

@@ -39,15 +39,33 @@ PYBOOT
     python "$TMPDIR/get-pip.py"
 fi
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install --only-binary=:all: torch torchvision --index-url https://download.pytorch.org/whl/cu128
+python -m pip install --only-binary=:all: torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
 python -m pip install 'transformers==5.17.0' 'peft==0.21.0' 'trl==1.13.0' 'accelerate==1.15.0' 'datasets==5.0.1' pillow sentencepiece openai fastapi uvicorn httpx jsonschema pytest
-python -m pip check
 python - <<'PY'
 import importlib.metadata
 import json
 import os
 import platform
 from pathlib import Path
+import struct
+import subprocess
+import sys
+check = subprocess.run([sys.executable, '-m', 'pip', 'check'], capture_output=True, text=True)
+warning = check.stdout.strip()
+if check.returncode:
+    # NVIDIA ships an ARM SBSA ELF with a nonstandard "sbsa" wheel tag.
+    # Do not waive any dependency conflict or any other platform mismatch.
+    expected = 'nvidia-cusparselt-cu12 0.7.1 is not supported on this platform'
+    assert warning == expected and not check.stderr.strip(), check.stdout + check.stderr
+    dist = importlib.metadata.distribution('nvidia-cusparselt-cu12')
+    assert 'Tag: py3-none-manylinux2014_sbsa' in dist.read_text('WHEEL')
+    libs = [dist.locate_file(f) for f in dist.files if '.so' in str(f) and '/lib/' in str(f)]
+    assert libs, 'No cuSPARSELt library found'
+    for lib in libs:
+        with lib.open('rb') as fh:
+            header = fh.read(20)
+        assert header[:4] == b'\x7fELF' and struct.unpack('<H', header[18:20])[0] == 183, f'Not AArch64 ELF: {lib}'
+    print('Verified ARM SBSA library; recording the nonstandard wheel-tag warning:', warning)
 import torch
 from transformers import AutoModelForImageTextToText, MuseGlimmerConfig
 assert torch.cuda.is_available(), 'torch.cuda.is_available() is False'
@@ -56,7 +74,7 @@ assert torch.cuda.is_bf16_supported(), 'bf16 is required'
 assert MuseGlimmerConfig in AutoModelForImageTextToText._model_mapping
 assert (torch.ones(2, device='cuda') + 1).sum().item() == 4
 packages = {p: importlib.metadata.version(p) for p in ['torch', 'torchvision', 'transformers', 'peft', 'trl', 'accelerate', 'datasets']}
-report = dict(job_id=os.environ['SLURM_JOB_ID'], host=platform.node(), machine=platform.machine(), cuda_available=torch.cuda.is_available(), cuda=torch.version.cuda, gpu=torch.cuda.get_device_name(), gpu_bytes=torch.cuda.get_device_properties(0).total_memory, packages=packages)
+report = dict(job_id=os.environ['SLURM_JOB_ID'], host=platform.node(), machine=platform.machine(), cuda_available=torch.cuda.is_available(), cuda=torch.version.cuda, gpu=torch.cuda.get_device_name(), gpu_bytes=torch.cuda.get_device_properties(0).total_memory, packages=packages, pip_check_warning=warning if check.returncode else None)
 Path('artifacts/environment.json').write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps(report, indent=2))
 PY
