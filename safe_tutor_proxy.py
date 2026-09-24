@@ -41,6 +41,7 @@ import time
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from content_filter import ContentFilter, Action  # noqa: E402
+from tutor_channels import student_content  # noqa: E402
 
 
 def emit_escalation(event: dict, path="logs/escalations.jsonl"):
@@ -106,7 +107,10 @@ def build_app(tutor_url: str, api_key: str):
                 model=model, messages=messages,
                 max_tokens=body.get("max_tokens", 512),
                 temperature=body.get("temperature", 0.3))
-            answer = resp.choices[0].message.content
+            # Extract to=user BEFORE content moderation; private reasoning and
+            # tool payloads never enter the filter logs or the student response.
+            # Malformed/truncated channels fail closed through the error response.
+            answer = student_content(resp.choices[0].message)
         except Exception as e:
             return JSONResponse(
                 _completion_shell(

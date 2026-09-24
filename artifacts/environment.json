@@ -1,0 +1,19 @@
+{
+  "job_id": "2197519",
+  "host": "quanta-gh200-1.csail.mit.edu",
+  "machine": "aarch64",
+  "cuda_available": true,
+  "cuda": "12.8",
+  "gpu": "NVIDIA GH200 480GB",
+  "gpu_bytes": 102005473280,
+  "packages": {
+    "torch": "2.11.0+cu128",
+    "torchvision": "0.26.0+cu128",
+    "transformers": "5.17.0",
+    "peft": "0.21.0",
+    "trl": "1.13.0",
+    "accelerate": "1.15.0",
+    "datasets": "5.0.1"
+  },
+  "pip_check_warning": "nvidia-cusparselt-cu12 0.7.1 is not supported on this platform"
+}

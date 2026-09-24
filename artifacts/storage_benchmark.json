@@ -1,0 +1,20 @@
+{
+  "job_id": "2197295",
+  "host": "quanta-gh200-1.csail.mit.edu",
+  "bytes_per_write": 2097152000,
+  "direct_io": true,
+  "measurements": [
+    {
+      "root": "/data/scratch/ashwin",
+      "seconds": 3.63732,
+      "MB_per_second": 577
+    },
+    {
+      "root": "/data/scratch-oc40/ashwin",
+      "seconds": 12.6244,
+      "MB_per_second": 166
+    }
+  ],
+  "selected_root": "/data/scratch/ashwin",
+  "test_files_removed": true
+}
