@@ -124,6 +124,10 @@ def main():
     model = get_peft_model(model, LoraConfig(r=args.rank, lora_alpha=args.alpha, lora_dropout=args.dropout, bias='none', task_type='CAUSAL_LM', target_modules=targets))
     if is_muse:
         assert_language_only_adapter(model)
+        # PEFT minimizes long target lists during injection. Preserve the verified
+        # full paths in exported metadata for safe reloads and serving preflight.
+        model.peft_config['default'].target_modules = set(targets)
+        model.peft_config['default'].revision = revision or getattr(config, '_commit_hash', None)
     model.print_trainable_parameters()
 
     class SaveOnSignal(TrainerCallback):

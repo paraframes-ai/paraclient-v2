@@ -6,6 +6,13 @@ learns **socratic** and **graduated_hint** behavior, selected by its system prom
 Socratic mode withholds the answer; graduated hints can provide worked steps after
 the student remains stuck. This is a research pipeline, not a student deployment.
 
+The authorized smoke run **2197693 completed successfully** in 1m51s: 404
+examples (202 per mode), SIGUSR1 save at step 2, automatic resume to step 6,
+62.8 GB peak allocated CUDA memory, and a 419 MB adapter. All 24 CPU regression
+tests passed. Compact evidence is in `artifacts/smoke_result.json` and
+[artifacts/VALIDATION.md](artifacts/VALIDATION.md). These are pipeline checks,
+not a measurement of tutoring quality; live behavioral evaluation remains pending.
+
 ## Remote workspace and environment
 
 All project work is on CSAIL NFS, never the laptop or AFS home:
@@ -111,7 +118,9 @@ python train_adapter.py --base muse --subject math --data data/my-trial/math.jso
 Muse defaults: BF16 **without quantization**, LoRA r=16 / alpha=32 / dropout=0.05,
 SDPA, gradient checkpointing, batch size 1, accumulation 16, sequence length 2048,
 and a checkpoint every 50 optimizer steps. Only language LoRA parameters are
-trainable; runtime assertions enforce this. Training uses Transformers Trainer
+trainable; runtime assertions enforce this. PEFT may minimize long target lists
+during injection; the trainer restores the verified full paths and pinned base
+revision in saved adapter metadata. Training uses Transformers Trainer
 with explicit chat rendering and attention-mask-based label padding; TRL is
 installed but its version-dependent SFT formatting API is not required.
 

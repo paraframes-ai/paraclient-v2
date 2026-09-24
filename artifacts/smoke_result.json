@@ -1,0 +1,68 @@
+{
+  "signal_save": {
+    "train_runtime": 21.9022,
+    "train_samples_per_second": 0.548,
+    "train_steps_per_second": 0.274,
+    "total_flos": 236441129318400.0,
+    "train_loss": 1.9710073471069336,
+    "epoch": 0.009900990099009901,
+    "global_step": 2,
+    "stopped_by": "SIGUSR1",
+    "resumed_from": null,
+    "cuda_peak_bytes": 62717816320
+  },
+  "resume": {
+    "train_runtime": 34.9952,
+    "train_samples_per_second": 0.343,
+    "train_steps_per_second": 0.171,
+    "total_flos": 707782497177600.0,
+    "train_loss": 0.6117231249809265,
+    "epoch": 0.0297029702970297,
+    "global_step": 6,
+    "stopped_by": null,
+    "resumed_from": "adapters/smoke-2197693/math/checkpoint-2",
+    "cuda_peak_bytes": 62817204736
+  },
+  "adapter_bytes": 419293392,
+  "metadata_normalization": {
+    "reason": "PEFT 0.21 minimizes target suffixes during injection; restore verified full paths and base revision for export.",
+    "original_minimized_targets": [
+      "up_proj",
+      "self_attn.v_proj",
+      "self_attn.q_proj",
+      "down_proj",
+      "gate_proj",
+      "o_proj",
+      "self_attn.k_proj"
+    ],
+    "verified_language_tensor_count": 832,
+    "configs_updated": [
+      "adapters/smoke-2197693/math/adapter_config.json",
+      "adapters/smoke-2197693/math/checkpoint-5/adapter_config.json",
+      "adapters/smoke-2197693/math/checkpoint-6/adapter_config.json"
+    ],
+    "adapter_weights_unchanged": true
+  },
+  "job_id": "2197693",
+  "slurm_state": "COMPLETED",
+  "slurm_exit_code": "0:0",
+  "elapsed": "00:01:51",
+  "time_limit": "00:45:00",
+  "subject": "math",
+  "source_problem_limit": 200,
+  "dataset_rows": 404,
+  "socratic_rows": 202,
+  "graduated_hint_rows": 202,
+  "optimizer_steps": 6,
+  "sequence_length": 512,
+  "batch_size": 1,
+  "gradient_accumulation": 2,
+  "unit_tests_passed": 24,
+  "adapter_directory": "/data/scratch/ashwin/paraclient-muse/adapters/smoke-2197693/math",
+  "checkpoints_retained": [
+    "checkpoint-5",
+    "checkpoint-6"
+  ],
+  "live_behavioral_evaluation": "not run; requires an authorized server",
+  "serving_validation": "script syntax/source checked; tardy not contacted"
+}
