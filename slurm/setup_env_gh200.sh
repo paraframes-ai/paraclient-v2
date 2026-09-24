@@ -23,8 +23,9 @@ fi
 if [[ ! -d "$VENV" ]]; then
     mkdir -p "$VENV"
     touch "$VENV/.paraclient-muse-env"
-    python3 -m venv --without-pip "$VENV"
 fi
+# Also complete a partial venv left by an interrupted bootstrap.
+python3 -m venv --without-pip "$VENV"
 source "$VENV/bin/activate"
 if ! python -m pip --version >/dev/null 2>&1; then
     python - <<'PYBOOT'

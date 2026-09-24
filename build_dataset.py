@@ -7,14 +7,12 @@ Design goals:
 - Two behavior MODES baked into the data so ONE adapter can do both:
     * "socratic"      -> tutor withholds the answer, asks guiding questions.
     * "graduated_hint"-> tutor guides first, then escalates to hints / worked steps.
-- Only clean, commercially-usable sources are enabled by default.
+- Retain source provenance and review data for this CSAIL research project.
 
 Currently implemented source:
   - GSM8K "socratic" config  (license: MIT)  -> subject: math
 
-Sources that need a license check before enabling for a COMMERCIAL product:
-  - MathDial (eth-nlped/mathdial)  -> confirm license, then add a builder.
-  - Eedi Question-Anchored...      -> NON-COMMERCIAL, do NOT use here.
+Check source license and attribution requirements before adding datasets.
 
 For civics / language_arts / general you will SYNTHESIZE dialogues (separate
 step) and drop them into data/raw/<subject>.synth.jsonl in the same schema this
@@ -187,7 +185,7 @@ def load_synth(subject: str, raw_dir: Path):
 
 # --- Validation -------------------------------------------------------------
 
-def validate(rows):
+def validate(rows, base="qwen"):
     ok = []
     for i, r in enumerate(rows):
         if r.get("subject") not in SUBJECT_LABEL:
@@ -197,6 +195,21 @@ def validate(rows):
         msgs = r.get("messages")
         if not msgs or msgs[0]["role"] != "system":
             raise ValueError(f"row {i}: messages must start with a system turn")
+        if not isinstance(msgs[0].get("content"), str):
+            raise ValueError(f"row {i}: system content must be text")
+        has_tools = bool(r.get("tools")) or any(m.get("tool_calls") or m.get("role") == "tool" for m in msgs)
+        if has_tools:
+            if base != "muse":
+                raise ValueError(f"row {i}: native tool dialogues require --base muse")
+            from tool_schema import validate_tool_dialogue
+            validate_tool_dialogue(r)
+            ok.append(r)
+            continue
+        for m in msgs:
+            if not isinstance(m.get("content"), str):
+                raise ValueError(f"row {i}: message content must be text")
+            if m.get("recipient", "user") != "user":
+                raise ValueError(f"row {i}: non-tool dialogues must be student-facing")
         # must alternate user/assistant after system, end on assistant
         roles = [m["role"] for m in msgs[1:]]
         if not roles or roles[0] != "user":
@@ -224,7 +237,13 @@ def main():
     ap.add_argument("--raw-dir", default="data/raw")
     ap.add_argument("--limit", type=int, default=None,
                     help="cap number of source problems (for quick test runs)")
+    ap.add_argument("--base", choices=("qwen", "muse"), default="qwen")
+    ap.add_argument("--revision", default=None, help="HF revision; Muse defaults to the inspected commit")
+    ap.add_argument("--tool-data", action="append", default=[],
+                    help="merge reviewed Muse-native tool JSONL; repeat for multiple files")
     args = ap.parse_args()
+    if args.limit is not None and args.limit <= 0:
+        ap.error("--limit must be positive")
 
     out_dir = Path(args.out_dir)
     raw_dir = Path(args.raw_dir)
@@ -238,16 +257,40 @@ def main():
     else:
         print(f"[*] Loading synthesized {args.subject} dialogues (if any)...")
         rows += load_synth(args.subject, raw_dir)
-        if not rows:
-            print(f"[!] No data for '{args.subject}' yet.")
-            print(f"    Create {raw_dir}/{args.subject}.synth.jsonl via the")
-            print(f"    synthesis + human-review step, then re-run.")
-            return
+        if args.limit:
+            rows = rows[:args.limit]
 
-    rows = validate(rows)
+    tool_paths = [Path(path) for path in args.tool_data]
+    default_tools = raw_dir / f"{args.subject}.tools.jsonl"
+    if args.base == "muse" and default_tools.exists() and default_tools not in tool_paths:
+        tool_paths.append(default_tools)
+    for path in tool_paths:
+        with path.open() as fh:
+            extra = [json.loads(line) for line in fh if line.strip()]
+        if any(not row.get("tools") for row in extra):
+            raise ValueError(f"{path}: tool examples must include tools schemas")
+        rows.extend(extra[:args.limit] if args.limit else extra)
+    if not rows:
+        raise SystemExit(f"No reviewed data for {args.subject}; create {raw_dir}/{args.subject}.synth.jsonl")
+    if any(row.get("subject") != args.subject for row in rows):
+        raise ValueError("Merged data contains a different subject")
+    rows = validate(rows, base=args.base)
+    from transformers import AutoTokenizer
+    from model_support import MODELS, render_dialogue
+    revision = args.revision
+    inspection = Path(__file__).resolve().parent / "artifacts/muse_inspection.json"
+    if args.base == "muse" and revision is None and inspection.exists():
+        revision = json.loads(inspection.read_text())["revision"]
+    tok = AutoTokenizer.from_pretrained(MODELS[args.base], revision=revision, token=False)
+    for row in rows:
+        # Preserve subject/mode/messages and native tool fields; text is additive.
+        row["text"] = render_dialogue(tok, row, args.base)
+        row["base_model"] = MODELS[args.base]
+        row["base_revision"] = tok.init_kwargs.get("_commit_hash") or revision
 
     out_path = out_dir / f"{args.subject}.jsonl"
-    with open(out_path, "w") as fh:
+    # Refuse to overwrite a previous build; choose a new --out-dir instead.
+    with open(out_path, "x") as fh:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
